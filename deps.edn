@@ -1,0 +1,17 @@
+{:paths ["src" "resources"]
+ :deps {org.clojure/clojure {:mvn/version "1.12.0"}}
+ :aliases
+ {:build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.5"}
+                 slipset/deps-deploy {:mvn/version "0.2.2"}}
+          :ns-default build}
+  :test {:extra-paths ["test"]
+         :extra-deps {org.clojure/test.check {:mvn/version "1.1.1"}
+                      io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}}
+  :nrepl {:extra-deps {nrepl/nrepl {:mvn/version "1.3.0"}}
+          :main-opts ["-m" "nrepl.cmdline"]}
+  :bench {:extra-paths ["bench"]
+          :extra-deps {criterium/criterium {:mvn/version "0.4.6"}}}
+  :bench-run {:extra-paths ["bench"]
+              :extra-deps {criterium/criterium {:mvn/version "0.4.6"}}
+              :main-opts ["-m" "s-exp.k7-bench"]}}}
