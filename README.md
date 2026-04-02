@@ -13,7 +13,7 @@ fsync strategies.
 
 ## Features
 
-- **High throughput** — ~16M msg/s enqueue and ~6M msg/s poll+ack (`:flush`, batch=64, Apple M1 JVM 21)
+- **High throughput** — ~16M msg/s enqueue and ~6M msg/s poll+ack (`:flush`, batch=64, Apple M-series JVM 21) — see [Performance](#performance)
 - **Append-only log** backed by preallocated mmap'd segment files
 - **Zero-copy reads** — payloads are read-only `ByteBuffer` slices into the mmap
 - **Consumer groups** with independent cursors, each persisted in its own mmap'd file
