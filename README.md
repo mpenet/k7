@@ -20,7 +20,9 @@ fsync strategies.
 - **Crash recovery** — on open, segments are scanned and the last valid frame is found via CRC32C
 - **Configurable fsync strategy** per queue (`:async`, `:flush`, `:sync`) and per consumer group
 - **`java.io.Closeable`** — both `Queue` and `ConsumerGroup` work with `with-open`
-- Zero reflection, no unnecessary allocations on the hot path
+- Zero reflection, minimal allocations on the hot path
+- Primitive `long[]`-backed pending-offset set — no `Long` boxing on ack/poll
+- Thread-local `CRC32C` via `ThreadLocal/withInitial` — zero per-message allocation for checksums
 
 ## Installation
 
@@ -192,6 +194,43 @@ Two daemon background threads are started when `:async` strategy is in use:
 - `k7-cursor-<group>` — periodically fsyncs the cursor file for a consumer group
 
 Both stop cleanly on close, flushing any pending data before exiting.
+
+## Performance
+
+Measured on Apple M-series, JVM 21, G1GC, 32-byte payloads.
+
+**`enqueue!` throughput:**
+
+| Strategy | Throughput |
+|----------|------------|
+| `:flush` | ~16.6M msg/s |
+| `:async` | ~2.4M msg/s |
+| `:sync` | ~3.7K msg/s |
+
+`:async` throughput is limited by the `LockSupport/unpark` call on each write
+waking the commit thread. `:sync` is bounded by `msync` latency (~267µs/call on
+this hardware).
+
+**`poll+ack` throughput (batch=64):**
+
+| Strategy | Throughput |
+|----------|------------|
+| `:flush` | ~6.2M msg/s |
+| `:async` | ~4.4M msg/s |
+| `:sync` | ~49K msg/s |
+
+**`poll+ack` throughput by batch size (`:flush`):**
+
+| Batch size | Throughput |
+|------------|------------|
+| 1 | ~2.2M msg/s |
+| 16 | ~4.2M msg/s |
+| 64 | ~6.2M msg/s |
+| 256 | ~4.3M msg/s |
+
+`enqueue!` is zero-alloc. Per-message allocation in `poll!` is dominated by
+the read-only `ByteBuffer` slice returned as the payload (~192 bytes); the
+pending-offset tracking and CRC32C checksum contribute zero allocation.
 
 ## Development
 

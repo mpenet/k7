@@ -3,8 +3,10 @@
            (java.nio.channels FileChannel FileChannel$MapMode)
            (java.nio.file Files Path Paths StandardOpenOption OpenOption)
            (java.nio.file.attribute FileAttribute)
+           (java.util Arrays)
            (java.util.concurrent.atomic AtomicLong)
            (java.util.concurrent.locks LockSupport)
+           (java.util.function Supplier)
            (java.util.zip CRC32C)))
 
 (set! *warn-on-reflection* true)
@@ -25,9 +27,76 @@
 ;; FRAME_ALIGN bytes is the maximum padding ever needed.
 (def ^:private ^bytes ZERO_PAD (byte-array FRAME_ALIGN))
 
+;; Thread-local CRC32C instances — avoids per-message allocation on hot path.
+;; CRC32C is not thread-safe, so each thread gets its own instance.
+;; ThreadLocal/withInitial takes a Supplier — compiled to a direct interface call,
+;; no reflective dispatch unlike proxy.
+(def ^:private ^ThreadLocal tl-crc32c
+  (ThreadLocal/withInitial (reify Supplier (get [_] (CRC32C.)))))
+
 ;; AtomicLong.lazySet provides store-release semantics, equivalent to
 ;; VarHandle.setRelease, without needing a privileged module lookup.
 ;; Used in enqueue! and the commit thread to publish frame writes to readers.
+
+;;; ============================================================
+;;; Primitive pending-offset set
+;;; ============================================================
+
+;; LongSortedSet: a sorted set of long primitives backed by a long[].
+;;
+;; Offsets are always added in increasing order (poll! reads sequentially),
+;; so add! is a simple append. remove! does a binary search + compact shift.
+;; This avoids Long boxing and TreeSet node allocation on every message.
+;;
+;; definterface exposes typed methods so callers get direct invokevirtual
+;; with no reflection. set! on ^:unsynchronized-mutable fields is only
+;; allowed inside the deftype body, so all mutation lives in the impl below.
+;;
+;; All operations are single-threaded (consumer-group constraint).
+(definterface ILongSortedSet
+  (^void lssAdd [^long v])
+  (^void lssRemove [^long v])
+  (^long lssFirst [])
+  (^boolean lssEmpty [])
+  (^void lssClear []))
+
+(deftype LongSortedSet [^:unsynchronized-mutable ^longs data
+                        ^:unsynchronized-mutable ^int size]
+  ILongSortedSet
+  (lssAdd [this v]
+    (let [sz size
+          arr data]
+      (if (< sz (alength arr))
+        (do (aset arr sz v)
+            (set! size (unchecked-inc-int sz)))
+        ;; grow: double capacity
+        (let [new-cap (bit-shift-left (alength arr) 1)
+              new-arr (Arrays/copyOf arr new-cap)]
+          (aset new-arr sz v)
+          (set! data new-arr)
+          (set! size (unchecked-inc-int sz))))))
+  (lssRemove [this v]
+    (let [sz size
+          arr data
+          idx (Arrays/binarySearch arr 0 sz v)]
+      (when (>= idx 0)
+        (System/arraycopy arr (inc idx) arr idx (- sz idx 1))
+        (set! size (unchecked-dec-int sz)))))
+  (lssFirst [this] (aget data 0))
+  (lssEmpty [this] (== 0 size))
+  (lssClear [this] (set! size (int 0))))
+
+(defn lss-new
+  "Create a new empty LongSortedSet with the given initial capacity."
+  (^LongSortedSet [] (lss-new 16))
+  (^LongSortedSet [^long init-cap]
+   (LongSortedSet. (long-array init-cap) 0)))
+
+(defn lss-add! [^ILongSortedSet lss ^long v] (.lssAdd lss v))
+(defn lss-remove! [^ILongSortedSet lss ^long v] (.lssRemove lss v))
+(defn lss-first ^long [^ILongSortedSet lss] (.lssFirst lss))
+(defn lss-empty? [^ILongSortedSet lss] (.lssEmpty lss))
+(defn lss-clear! [^ILongSortedSet lss] (.lssClear lss))
 
 ;;; ============================================================
 ;;; Frame encoding / decoding
@@ -40,11 +109,12 @@
 
 (defn write-frame!
   "Write a framed message into buf at position pos.
-   Returns total aligned bytes written."
-  ^long [^ByteBuffer buf ^long pos ^bytes data]
+   frame-size must be (aligned-frame-size (alength data)) — passed in to avoid
+   recomputing it since enqueue! already has this value."
+  ^long [^ByteBuffer buf ^long pos ^bytes data ^long frame-size]
   (let [len (alength data)
-        frame-size (aligned-frame-size len)
-        crc (doto (CRC32C.) (.update data 0 len))
+        crc ^CRC32C (.get tl-crc32c)
+        _ (doto crc (.reset) (.update data 0 len))
         crc-val (unchecked-int (.getValue crc))
         pad (int (- frame-size FRAME_HEADER_SIZE len))]
     (.position buf (int pos))
@@ -75,7 +145,8 @@
                             (.position (int (+ pos FRAME_HEADER_SIZE)))
                             (.limit (int end))
                             .slice)
-                  crc (doto (CRC32C.) (.update ^ByteBuffer slice))]
+                  crc ^CRC32C (.get tl-crc32c)
+                  _ (doto crc (.reset) (.update ^ByteBuffer slice))]
               (== stored-crc (unchecked-int (.getValue crc))))))))))
 
 (defn read-frame-payload
@@ -111,14 +182,18 @@
                           StandardOpenOption/WRITE
                           StandardOpenOption/CREATE])
         ch (FileChannel/open path opts)]
-    (when (< (.size ch) segment-size)
-      (.write ch (ByteBuffer/allocate 1) (dec segment-size)))
-    (let [mmap (doto (.map ch FileChannel$MapMode/READ_WRITE 0 segment-size)
-                 (.order ByteOrder/BIG_ENDIAN))]
-      (Segment. ch mmap path base-offset
-                (AtomicLong. 0)
-                (AtomicLong. 0)
-                segment-size))))
+    (try
+      (when (< (.size ch) segment-size)
+        (.write ch (ByteBuffer/allocate 1) (dec segment-size)))
+      (let [mmap (doto (.map ch FileChannel$MapMode/READ_WRITE 0 segment-size)
+                   (.order ByteOrder/BIG_ENDIAN))]
+        (Segment. ch mmap path base-offset
+                  (AtomicLong. 0)
+                  (AtomicLong. 0)
+                  segment-size))
+      (catch Throwable t
+        (.close ch)
+        (throw t)))))
 
 (defn close-segment! [^Segment seg]
   (.force ^MappedByteBuffer (.mmap seg))
@@ -164,13 +239,23 @@
 
 (declare close-queue! close-consumer-group!)
 
+;; IQueueState: typed getter/setter for the commit thread volatile field.
+;; definterface methods are direct JVM calls — no reflection, no boxing.
+;; The setter is only called once (at open time); the getter is on the hot path
+;; for every :async enqueue!.
+(definterface IQueueState
+  (^Thread getCommitThread [])
+  (^void setCommitThread [^Thread t]))
+
 (deftype Queue [^Path dir
                 ^long segment-size
                 segments ; atom: vector of Segment
-                ^AtomicLong global-write-offset
-                commit-thread ; atom: Thread (nil when fsync-strategy != :async)
+                ^:volatile-mutable ^Thread commit-thread
                 open? ; atom: boolean
                 fsync-strategy]
+  IQueueState
+  (getCommitThread [_] commit-thread)
+  (setCommitThread [_ t] (set! commit-thread t))
   java.io.Closeable
   (close [this] (close-queue! this)))
 
@@ -184,11 +269,14 @@
   (peek @(.segments q)))
 
 (defn- roll-segment! ^Segment [^Queue q]
-  (let [base (.get ^AtomicLong (.global-write-offset q))
+  (let [cur (peek @(.segments q))
+        base (if cur
+               (+ (.base-offset ^Segment cur) (.get ^AtomicLong (.write-pos ^Segment cur)))
+               0)
         new-seg (open-segment (segment-path ^Path (.dir q) base)
                               base
                               (.segment-size q))]
-    (when-let [cur (peek @(.segments q))]
+    (when cur
       (force-segment! cur))
     (swap! (.segments q) conj new-seg)
     new-seg))
@@ -212,7 +300,7 @@
                 dir
                 (Paths/get ^String dir (make-array String 0)))
          _ (Files/createDirectories path (make-array FileAttribute 0))
-         q (Queue. path segment-size (atom []) (AtomicLong. 0) (atom nil) (atom true) fsync-strategy)
+         q (Queue. path segment-size (atom []) nil (atom true) fsync-strategy)
          existing (with-open [stream (Files/list path)]
                     (->> (.iterator stream)
                          iterator-seq
@@ -221,52 +309,59 @@
                                      (and (.endsWith n ".k7")
                                           (.startsWith n "seg-")))))
                          (sort-by (fn [^Path p] (.. p getFileName toString)))
-                         doall))] ; realize before stream closes]
+                         doall))] ; realize before stream closes
      (if (seq existing)
-       (let [segs (mapv (fn [^Path p]
-                          (let [fname (.. p getFileName toString)
-                                base (Long/parseLong (second (re-find #"seg-0*(\d+)" fname)))
-                                seg (open-segment p base segment-size)]
-                            (recover-segment! seg)
-                            seg))
-                        existing)
-             last-seg ^Segment (peek segs)]
-         (.set ^AtomicLong (.global-write-offset q)
-               (+ (.base-offset last-seg) (.get ^AtomicLong (.write-pos last-seg))))
+       ;; Open segments one by one, closing already-opened ones on failure
+       ;; to avoid FileChannel leaks during recovery.
+       (let [segs (reduce (fn [acc ^Path p]
+                            (try
+                              (let [fname (.. p getFileName toString)
+                                    base (Long/parseLong (second (re-find #"seg-0*(\d+)" fname)))
+                                    seg (open-segment p base segment-size)]
+                                (recover-segment! seg)
+                                (conj acc seg))
+                              (catch Throwable t
+                                (doseq [s acc] (close-segment! s))
+                                (throw t))))
+                          []
+                          existing)]
          (reset! (.segments q) segs))
        (roll-segment! q))
      ;; commit thread only used for :async strategy
      (when (= fsync-strategy :async)
-       (let [commit-thread (doto (Thread.
-                                  ^Runnable
-                                  (fn []
-                                    ;; Cache the current segment; refresh only when it changes
-                                    ;; (segment roll), avoiding an atom deref on every tick.
-                                    (loop [cached ^Segment (current-segment q)]
-                                      (when @(.open? q)
-                                        (let [cur ^Segment (current-segment q)
-                                              ;; refresh cache on segment roll
-                                              seg ^Segment (if (identical? cur cached) cached cur)]
-                                          (when seg
-                                            (let [wp (.get ^AtomicLong (.write-pos seg))
-                                                  cp (.get ^AtomicLong (.committed-pos seg))]
-                                              (when (> wp cp)
-                                                (force-segment! seg)
-                                                (.lazySet ^AtomicLong (.committed-pos seg) wp))))
-                                          ;; park up to commit-interval-us; unparked early by enqueue!
-                                          (LockSupport/parkNanos (* ^long commit-interval-us 1000))
-                                          (recur seg)))))
-                                  "k7-commit")
-                             (.setDaemon true)
-                             .start)]
-         (reset! (.commit-thread q) commit-thread)))
+       (let [^Thread t (Thread.
+                        ^Runnable
+                        (fn []
+                          ;; Cache the current segment; refresh only when it changes
+                          ;; (segment roll), avoiding an atom deref on every tick.
+                          (loop [cached ^Segment (current-segment q)]
+                            (when @(.open? q)
+                              (let [cur ^Segment (current-segment q)
+                                    ;; refresh cache on segment roll
+                                    seg ^Segment (if (identical? cur cached) cached cur)]
+                                (when seg
+                                  (let [wp (.get ^AtomicLong (.write-pos seg))
+                                        cp (.get ^AtomicLong (.committed-pos seg))]
+                                    (when (> wp cp)
+                                      (force-segment! seg)
+                                      (.lazySet ^AtomicLong (.committed-pos seg) wp))))
+                                ;; park up to commit-interval-us; unparked early by enqueue!
+                                (LockSupport/parkNanos (* ^long commit-interval-us 1000))
+                                (recur seg)))))
+                        "k7-commit")]
+         (.setDaemon t true)
+         (.start t)
+         (.setCommitThread q t)))
      q)))
 
 (defn close-queue! [^Queue q]
   (reset! (.open? q) false)
-  ;; final flush before closing
-  (when-let [seg ^Segment (current-segment q)]
-    (force-segment! seg))
+  ;; Unpark and join the commit thread so any in-flight force completes
+  ;; before we close the underlying FileChannels.
+  (when-let [t (.getCommitThread q)]
+    (LockSupport/unpark t)
+    (.join t))
+  ;; Final flush: close-segment! calls mmap.force + channel.close for each segment.
   (doseq [seg @(.segments q)]
     (close-segment! seg)))
 
@@ -289,14 +384,13 @@
         local-pos (.get ^AtomicLong (.write-pos seg))
         global-off (+ (.base-offset seg) local-pos)
         next-pos (+ local-pos frame-size)]
-    (write-frame! ^MappedByteBuffer (.mmap seg) local-pos data)
+    (write-frame! ^MappedByteBuffer (.mmap seg) local-pos data frame-size)
     ;; lazySet (store-release): ensures write-frame! bytes are visible to any
     ;; thread that subsequently reads write-pos with .get (load-acquire),
     ;; forming a happens-before edge per JMM without a full volatile fence.
     (.lazySet ^AtomicLong (.write-pos seg) next-pos)
-    (.set ^AtomicLong (.global-write-offset q) (+ global-off frame-size))
     (case (.fsync-strategy q)
-      :async (LockSupport/unpark ^Thread @(.commit-thread q))
+      :async (LockSupport/unpark (.getCommitThread q))
       :flush (.lazySet ^AtomicLong (.committed-pos seg) next-pos)
       :sync (do (force-segment! seg)
                 (.set ^AtomicLong (.committed-pos seg) next-pos)))
@@ -309,19 +403,35 @@
 ;; cursor file layout:
 ;;   offset 0 : committed-offset (long) — fsynced by cursor-flush thread
 
-;; Per-message delivery value — avoids map allocation on hot path
+;; Per-message delivery value — avoids map allocation on hot path.
+;; payload is a read-only ByteBuffer slice over the mmap.
 (deftype Msg [^long offset ^ByteBuffer payload])
+
+;; ICGState: typed accessors for the two volatile fields of ConsumerGroup.
+;;   pending             — mutable LongSortedSet, polled/acked on every message
+;;   cursor-flush-thread — set once at open, read on every :async ack
+;; definterface methods compile to direct invokevirtual — no reflection, no wrapping.
+(definterface ICGState
+  (^s_exp.k7.ILongSortedSet getPending [])
+  (^void setPending [^s_exp.k7.ILongSortedSet lss])
+  (^Thread getCursorFlushThread [])
+  (^void setCursorFlushThread [^Thread t]))
 
 (deftype ConsumerGroup [^String id
                         ^MappedByteBuffer cursor-mmap
                         ^FileChannel cursor-channel
                         ^AtomicLong read-head ; in-memory, tracks next-to-read
-                        pending ; atom: sorted-set of unacked global offsets
+                        ^:volatile-mutable ^ILongSortedSet pending
                         ^Queue queue
                         cursor-dirty? ; atom: boolean, true when cursor needs flush
                         cursor-open? ; atom: boolean stop flag for flush thread
-                        cursor-flush-thread ; atom: Thread (nil when strategy != :async)
+                        ^:volatile-mutable ^Thread cursor-flush-thread
                         cursor-fsync-strategy]
+  ICGState
+  (getPending [_] pending)
+  (setPending [_ lss] (set! pending lss))
+  (getCursorFlushThread [_] cursor-flush-thread)
+  (setCursorFlushThread [_ t] (set! cursor-flush-thread t))
   java.io.Closeable
   (close [this] (close-consumer-group! this)))
 
@@ -341,45 +451,49 @@
                           [StandardOpenOption/READ
                            StandardOpenOption/WRITE
                            StandardOpenOption/CREATE])
-         ch (FileChannel/open path opts)
-         _ (when (< (.size ch) CURSOR_FILE_SIZE)
-             (.write ch (ByteBuffer/allocate 1) (dec CURSOR_FILE_SIZE)))
-         mmap (doto (.map ch FileChannel$MapMode/READ_WRITE 0 CURSOR_FILE_SIZE)
-                (.order ByteOrder/BIG_ENDIAN))
-         committed-off (.getLong ^ByteBuffer mmap 0)
-         cg (ConsumerGroup. group-id mmap ch
-                            (AtomicLong. committed-off)
-                            (atom (sorted-set))
-                            q
-                            (atom false)
-                            (atom true) ; cursor-open?
-                            (atom nil)
-                            cursor-fsync-strategy)]
-     (when (= cursor-fsync-strategy :async)
-       (let [flush-thread (doto (Thread.
-                                 ^Runnable
-                                 (fn []
-                                   ;; Run while open; on stop do one final flush if dirty.
-                                   (while @(.cursor-open? cg)
-                                     (when @(.cursor-dirty? cg)
-                                       (.force ^MappedByteBuffer (.cursor-mmap cg))
-                                       (reset! (.cursor-dirty? cg) false))
-                                     (LockSupport/parkNanos 100000)) ; 100µs
-                                   ;; Final flush after stop signal
-                                   (when @(.cursor-dirty? cg)
-                                     (.force ^MappedByteBuffer (.cursor-mmap cg))
-                                     (reset! (.cursor-dirty? cg) false)))
-                                 (str "k7-cursor-" group-id))
-                            (.setDaemon true)
-                            .start)]
-         (reset! (.cursor-flush-thread cg) flush-thread)))
-     cg)))
+         ch (FileChannel/open path opts)]
+     (try
+       (when (< (.size ch) CURSOR_FILE_SIZE)
+         (.write ch (ByteBuffer/allocate 1) (dec CURSOR_FILE_SIZE)))
+       (let [mmap (doto (.map ch FileChannel$MapMode/READ_WRITE 0 CURSOR_FILE_SIZE)
+                    (.order ByteOrder/BIG_ENDIAN))
+             committed-off (.getLong ^ByteBuffer mmap 0)
+             cg (ConsumerGroup. group-id mmap ch
+                                (AtomicLong. committed-off)
+                                (lss-new)
+                                q
+                                (atom false)
+                                (atom true) ; cursor-open?
+                                nil
+                                cursor-fsync-strategy)]
+         (when (= cursor-fsync-strategy :async)
+           (let [^Thread t (Thread.
+                            ^Runnable
+                            (fn []
+                              ;; Run while open; on stop do one final flush if dirty.
+                              (while @(.cursor-open? cg)
+                                (when @(.cursor-dirty? cg)
+                                  (.force ^MappedByteBuffer (.cursor-mmap cg))
+                                  (reset! (.cursor-dirty? cg) false))
+                                (LockSupport/parkNanos 100000)) ; 100µs
+                              ;; Final flush after stop signal
+                              (when @(.cursor-dirty? cg)
+                                (.force ^MappedByteBuffer (.cursor-mmap cg))
+                                (reset! (.cursor-dirty? cg) false)))
+                            (str "k7-cursor-" group-id))]
+             (.setDaemon t true)
+             (.start t)
+             (.setCursorFlushThread cg t)))
+         cg)
+       (catch Throwable t
+         (.close ch)
+         (throw t))))))
 
 (defn close-consumer-group! [^ConsumerGroup cg]
   ;; Signal flush thread to stop, unpark it so it exits promptly,
   ;; then join to ensure the final flush completes before we close the channel.
   (reset! (.cursor-open? cg) false)
-  (when-let [t ^Thread @(.cursor-flush-thread cg)]
+  (when-let [t (.getCursorFlushThread cg)]
     (LockSupport/unpark t)
     (.join t))
   ;; Unconditional final force covers :flush and :sync strategies too.
@@ -390,25 +504,26 @@
   (.putLong ^ByteBuffer (.cursor-mmap cg) 0 offset)
   (case (.cursor-fsync-strategy cg)
     :async (do (reset! (.cursor-dirty? cg) true)
-               (LockSupport/unpark ^Thread @(.cursor-flush-thread cg)))
+               (LockSupport/unpark (.getCursorFlushThread cg)))
     :flush nil ; mmap write sufficient; OS will flush eventually
     :sync (.force ^MappedByteBuffer (.cursor-mmap cg))))
 
 (defn- contiguous-frontier
   "Lowest unacked offset (= safe commit point).
    If pending is empty the full read-head is committed."
-  ^long [pending ^long read-head]
-  (if (empty? pending)
+  ^long [^ILongSortedSet pending ^long read-head]
+  (if (lss-empty? pending)
     read-head
-    (long (first pending))))
+    (lss-first pending)))
 
 (defn ack!
   "Acknowledge a delivered message by its global offset.
    Updates cursor asynchronously via flush thread.
    Not thread-safe: must be called from the same thread as poll!."
   [^ConsumerGroup cg ^long global-offset]
-  (let [frontier (-> (swap! (.pending cg) disj global-offset)
-                     (contiguous-frontier (.get ^AtomicLong (.read-head cg))))]
+  (let [^ILongSortedSet p (.getPending cg)
+        _ (lss-remove! p global-offset)
+        frontier (contiguous-frontier p (.get ^AtomicLong (.read-head cg)))]
     (write-cursor! cg frontier)))
 
 (defn seek!
@@ -420,7 +535,7 @@
      - any valid global offset (e.g. from a previous Msg)
      - 0 to replay from the beginning of the queue"
   [^ConsumerGroup cg ^long offset]
-  (reset! (.pending cg) (sorted-set))
+  (lss-clear! (.getPending cg))
   (.set ^AtomicLong (.read-head cg) offset)
   (write-cursor! cg offset))
 
@@ -428,7 +543,7 @@
   "Negative-ack: rewinds read-head so the message is redelivered.
    Not thread-safe: must be called from the same thread as poll!."
   [^ConsumerGroup cg ^long global-offset]
-  (swap! (.pending cg) disj global-offset)
+  (lss-remove! (.getPending cg) global-offset)
   (let [cur (.get ^AtomicLong (.read-head cg))]
     (when (< global-offset cur)
       (.set ^AtomicLong (.read-head cg) global-offset))))
@@ -457,7 +572,9 @@
                    best)))))))
 
 (defn- try-read-one!
-  "Attempt to read one message. Returns a Msg or nil."
+  "Attempt to read one message. Returns a Msg or nil.
+   Fuses frame validation and payload extraction into one pass:
+   one ByteBuffer.duplicate, one slice — reused for both CRC check and payload."
   [^ConsumerGroup cg ^Segment cached-seg]
   (let [q ^Queue (.queue cg)
         rh (.get ^AtomicLong (.read-head cg))
@@ -473,14 +590,31 @@
             local-pos (- rh (.base-offset seg))
             committed (.get ^AtomicLong (.committed-pos seg))]
         (when (< local-pos committed)
-          (let [mmap ^MappedByteBuffer (.mmap seg)]
-            (when (valid-frame? mmap local-pos (.capacity seg))
-              (let [payload (read-frame-payload mmap local-pos)
-                    frame-size (frame-total-size mmap local-pos)
-                    next-rh (+ rh frame-size)]
-                (.set ^AtomicLong (.read-head cg) next-rh)
-                (swap! (.pending cg) conj rh)
-                (Msg. rh payload)))))))))
+          (let [mmap ^MappedByteBuffer (.mmap seg)
+                cap (.capacity seg)]
+            (when (< (+ local-pos FRAME_HEADER_SIZE) cap)
+              (let [magic (.get mmap (int local-pos))
+                    flags (.get mmap (int (inc local-pos)))]
+                (when (and (== magic MAGIC) (== flags FLAG_COMMITTED))
+                  (let [len (.getInt mmap (int (+ local-pos 2)))
+                        stored-crc (unchecked-int (.getInt mmap (int (+ local-pos 6))))
+                        payload-start (int (+ local-pos FRAME_HEADER_SIZE))
+                        end (int (+ local-pos FRAME_HEADER_SIZE len))]
+                    (when (and (pos? len) (<= end cap))
+                      ;; One duplicate, one slice — used for both CRC validation
+                      ;; and returned as the payload (rewound, made read-only).
+                      (let [dup (.duplicate mmap)
+                            _ (-> dup (.position payload-start) (.limit end))
+                            slice (.slice dup)
+                            crc ^CRC32C (.get tl-crc32c)
+                            _ (doto crc (.reset) (.update ^ByteBuffer slice))]
+                        (when (== stored-crc (unchecked-int (.getValue crc)))
+                          (let [frame-size (aligned-frame-size len)
+                                next-rh (+ rh frame-size)]
+                            (.set ^AtomicLong (.read-head cg) next-rh)
+                            (lss-add! (.getPending cg) rh)
+                            ;; read-only view: prevents callers from corrupting mmap data
+                            (Msg. rh (-> slice .rewind .asReadOnlyBuffer))))))))))))))))
 
 (defn poll!
   "Adaptive batch poll. Returns a vector of Msg records.
