@@ -245,6 +245,6 @@ clojure -M:bench-run
 
 ## License
 
-Copyright © 2026 Mpenet
+Copyright © 2026 Max Penet
 
 Distributed under the Eclipse Public License version 1.0.
