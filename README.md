@@ -14,15 +14,13 @@ fsync strategies.
 ## Features
 
 - **Append-only log** backed by preallocated mmap'd segment files
-- **Zero-copy reads** — payloads are read-only `ByteBuffer` slices into the mmap, no copying
+- **Zero-copy reads** — payloads are read-only `ByteBuffer` slices into the mmap
 - **Consumer groups** with independent cursors, each persisted in its own mmap'd file
 - **Ack / nack / seek** — at-least-once delivery, redelivery on nack, arbitrary seek
-- **Crash recovery** — on open, segments are scanned and the last valid frame is found via CRC32C
+- **Crash recovery** — segments are scanned on open; the last valid CRC32C-verified frame is found automatically
 - **Configurable fsync strategy** per queue (`:async`, `:flush`, `:sync`) and per consumer group
 - **`java.io.Closeable`** — both `Queue` and `ConsumerGroup` work with `with-open`
-- Zero reflection, minimal allocations on the hot path
-- Primitive `long[]`-backed pending-offset set — no `Long` boxing on ack/poll
-- Thread-local `CRC32C` via `ThreadLocal/withInitial` — zero per-message allocation for checksums
+- **Low allocation** — `enqueue!` is zero-alloc; `poll!` allocates only the read-only `ByteBuffer` slice per message; pending-offset tracking uses a primitive `long[]` with no boxing
 
 ## Installation
 
