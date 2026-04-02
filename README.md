@@ -13,6 +13,7 @@ fsync strategies.
 
 ## Features
 
+- **High throughput** — ~16M msg/s enqueue and ~6M msg/s poll+ack (`:flush`, batch=64, Apple M1 JVM 21)
 - **Append-only log** backed by preallocated mmap'd segment files
 - **Zero-copy reads** — payloads are read-only `ByteBuffer` slices into the mmap
 - **Consumer groups** with independent cursors, each persisted in its own mmap'd file
@@ -21,6 +22,7 @@ fsync strategies.
 - **Configurable fsync strategy** per queue (`:async`, `:flush`, `:sync`) and per consumer group
 - **`java.io.Closeable`** — both `Queue` and `ConsumerGroup` work with `with-open`
 - **Low allocation** — `enqueue!` is zero-alloc; `poll!` allocates only the read-only `ByteBuffer` slice per message; pending-offset tracking uses a primitive `long[]` with no boxing
+
 
 ## Installation
 
