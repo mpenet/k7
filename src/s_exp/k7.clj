@@ -407,6 +407,9 @@
 ;; payload is a read-only ByteBuffer slice over the mmap.
 (deftype Msg [^long offset ^ByteBuffer payload])
 
+(defn msg-offset ^long [^Msg m] (.offset m))
+(defn msg-payload ^ByteBuffer [^Msg m] (.payload m))
+
 ;; ICGState: typed accessors for the two volatile fields of ConsumerGroup.
 ;;   pending             — mutable LongSortedSet, polled/acked on every message
 ;;   cursor-flush-thread — set once at open, read on every :async ack

@@ -33,7 +33,6 @@ fsync strategies.
 
 ```clojure
 (require '[s-exp.k7 :as k7])
-(import '(s_exp.k7 Msg))
 
 ;; Open a queue (creates the directory if needed)
 (with-open [q  (k7/open-queue "/var/data/my-queue" {:fsync-strategy :flush})
@@ -45,9 +44,9 @@ fsync strategies.
 
   ;; Consume
   (let [batch (k7/poll! cg {:max-batch 10 :timeout-ms 50})]
-    (doseq [^Msg msg batch]
-      (println (.offset msg) "->" (String. (k7/payload->bytes (.payload msg))))
-      (k7/ack! cg (.offset msg)))))
+    (doseq [msg batch]
+      (println (k7/msg-offset msg) "->" (String. (k7/payload->bytes (k7/msg-payload msg))))
+      (k7/ack! cg (k7/msg-offset msg)))))
 ```
 
 ## API
@@ -112,17 +111,15 @@ on the same queue.
 
 ### Messages
 
-Each `Msg` returned by `poll!` has two fields, accessed via Java interop:
-
 ```clojure
-(.offset  ^Msg msg)   ; long — global offset, used for ack/nack
-(.payload ^Msg msg)   ; read-only ByteBuffer — zero-copy slice into mmap
+(k7/msg-offset  msg)  ; => long — global offset, used for ack/nack
+(k7/msg-payload msg)  ; => read-only ByteBuffer — zero-copy slice into mmap
 ```
 
 To copy the payload to a byte array:
 
 ```clojure
-(k7/payload->bytes (.payload msg))
+(k7/payload->bytes (k7/msg-payload msg))
 ```
 
 ### Utilities
