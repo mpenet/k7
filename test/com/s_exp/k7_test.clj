@@ -281,7 +281,7 @@
       (let [seg ^Segment (k7/current-segment q)
             mmap ^java.nio.MappedByteBuffer (.mmap seg)
             ;; payload starts at offset 10 (header size)
-            payload-pos (+ 0 k7/FRAME_HEADER_SIZE)]
+            payload-pos (+ 0 k7/frame-header-size)]
         ;; flip a bit in the payload
         (.put mmap (int payload-pos)
               (unchecked-byte (bit-xor (.get mmap (int payload-pos)) 0xFF))))

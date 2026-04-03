@@ -15,17 +15,17 @@
 ;;; Constants
 ;;; ============================================================
 
-(def ^:const ^byte MAGIC (byte 0x4B)) ; 'K'
-(def ^:const ^byte FLAG_COMMITTED (byte 0x01))
-(def ^:const ^int FRAME_HEADER_SIZE 10) ; magic(1)+flags(1)+length(4)+crc(4)
-(def ^:const ^int FRAME_ALIGN 8)
-(def ^:const ^long FRAME_ALIGN_MASK (dec FRAME_ALIGN)) ; for bitwise alignment
-(def ^:const ^long DEFAULT_SEGMENT_SIZE (* 256 1024 1024)) ; 256MB
-(def ^:const ^int CURSOR_FILE_SIZE 4096) ; one page
+(def ^:const ^byte magic (byte 0x4B)) ; 'K'
+(def ^:const ^byte flag-committed (byte 0x01))
+(def ^:const ^int frame-header-size 10) ; magic(1)+flags(1)+length(4)+crc(4)
+(def ^:const ^int frame-align 8)
+(def ^:const ^long frame-align-mask (dec frame-align)) ; for bitwise alignment
+(def ^:const ^long default-segment-size (* 256 1024 1024)) ; 256MB
+(def ^:const ^int cursor-file-size 4096) ; one page
 
 ;; Pre-allocated zero array for frame padding — avoids per-write allocation.
-;; FRAME_ALIGN bytes is the maximum padding ever needed.
-(def ^:private ^bytes ZERO_PAD (byte-array FRAME_ALIGN))
+;; frame-align bytes is the maximum padding ever needed.
+(def ^:private ^bytes zero-pad (byte-array frame-align))
 
 ;; Thread-local CRC32C instances — avoids per-message allocation on hot path.
 ;; CRC32C is not thread-safe, so each thread gets its own instance.
@@ -103,9 +103,9 @@
 ;;; ============================================================
 
 (defn aligned-frame-size ^long [^long payload-len]
-  (let [total (+ FRAME_HEADER_SIZE payload-len)
-        r (bit-and total FRAME_ALIGN_MASK)]
-    (if (zero? r) total (+ total (- FRAME_ALIGN r)))))
+  (let [total (+ frame-header-size payload-len)
+        r (bit-and total frame-align-mask)]
+    (if (zero? r) total (+ total (- frame-align r)))))
 
 (defn write-frame!
   "Write a framed message into buf at position pos.
@@ -116,33 +116,33 @@
         crc ^CRC32C (.get tl-crc32c)
         _ (doto crc (.reset) (.update data 0 len))
         crc-val (unchecked-int (.getValue crc))
-        pad (int (- frame-size FRAME_HEADER_SIZE len))]
+        pad (int (- frame-size frame-header-size len))]
     (.position buf (int pos))
-    (.put buf MAGIC)
-    (.put buf FLAG_COMMITTED)
+    (.put buf magic)
+    (.put buf flag-committed)
     (.putInt buf len)
     (.putInt buf crc-val)
     (.put buf data 0 len)
     (when (pos? pad)
-      (.put buf ZERO_PAD 0 pad))
+      (.put buf zero-pad 0 pad))
     frame-size))
 
 (defn valid-frame?
   "Returns true if there is a valid frame at pos in buf."
   [^ByteBuffer buf ^long pos ^long capacity]
-  (when (< (+ pos FRAME_HEADER_SIZE) capacity)
-    (let [magic (.get buf (int pos))
+  (when (< (+ pos frame-header-size) capacity)
+    (let [magic-byte (.get buf (int pos))
           flags (.get buf (int (inc pos)))]
-      (when (and (== magic MAGIC) (== flags FLAG_COMMITTED))
+      (when (and (== magic-byte magic) (== flags flag-committed))
         (let [len (.getInt buf (int (+ pos 2)))
               stored-crc (unchecked-int (.getInt buf (int (+ pos 6))))
-              end (+ pos FRAME_HEADER_SIZE len)]
+              end (+ pos frame-header-size len)]
           (when (and (pos? len) (<= end capacity))
             ;; slice the mmap directly — no byte-array allocation
             ;; mmap is already BIG_ENDIAN; duplicate inherits byte order
             (let [slice (-> buf
                             .duplicate
-                            (.position (int (+ pos FRAME_HEADER_SIZE)))
+                            (.position (int (+ pos frame-header-size)))
                             (.limit (int end))
                             .slice)
                   crc ^CRC32C (.get tl-crc32c)
@@ -156,8 +156,8 @@
   (let [len (.getInt mmap (int (+ pos 2)))]
     (-> mmap
         .duplicate
-        (.position (int (+ pos FRAME_HEADER_SIZE)))
-        (.limit (int (+ pos FRAME_HEADER_SIZE len)))
+        (.position (int (+ pos frame-header-size)))
+        (.limit (int (+ pos frame-header-size len)))
         .slice
         .asReadOnlyBuffer)))
 
@@ -293,7 +293,7 @@
      :commit-interval-us — fsync interval in microseconds for :async (default 50)"
   ([dir] (open-queue dir {}))
   ([dir {:keys [segment-size fsync-strategy commit-interval-us]
-         :or {segment-size DEFAULT_SEGMENT_SIZE
+         :or {segment-size default-segment-size
               fsync-strategy :async
               commit-interval-us 50}}]
    (let [path (if (instance? Path dir)
@@ -456,9 +456,9 @@
                            StandardOpenOption/CREATE])
          ch (FileChannel/open path opts)]
      (try
-       (when (< (.size ch) CURSOR_FILE_SIZE)
-         (.write ch (ByteBuffer/allocate 1) (dec CURSOR_FILE_SIZE)))
-       (let [mmap (doto (.map ch FileChannel$MapMode/READ_WRITE 0 CURSOR_FILE_SIZE)
+       (when (< (.size ch) cursor-file-size)
+         (.write ch (ByteBuffer/allocate 1) (dec cursor-file-size)))
+       (let [mmap (doto (.map ch FileChannel$MapMode/READ_WRITE 0 cursor-file-size)
                     (.order ByteOrder/BIG_ENDIAN))
              committed-off (.getLong ^ByteBuffer mmap 0)
              cg (ConsumerGroup. group-id mmap ch
@@ -595,14 +595,14 @@
         (when (< local-pos committed)
           (let [mmap ^MappedByteBuffer (.mmap seg)
                 cap (.capacity seg)]
-            (when (< (+ local-pos FRAME_HEADER_SIZE) cap)
-              (let [magic (.get mmap (int local-pos))
+            (when (< (+ local-pos frame-header-size) cap)
+              (let [magic-byte (.get mmap (int local-pos))
                     flags (.get mmap (int (inc local-pos)))]
-                (when (and (== magic MAGIC) (== flags FLAG_COMMITTED))
+                (when (and (== magic-byte magic) (== flags flag-committed))
                   (let [len (.getInt mmap (int (+ local-pos 2)))
                         stored-crc (unchecked-int (.getInt mmap (int (+ local-pos 6))))
-                        payload-start (int (+ local-pos FRAME_HEADER_SIZE))
-                        end (int (+ local-pos FRAME_HEADER_SIZE len))]
+                        payload-start (int (+ local-pos frame-header-size))
+                        end (int (+ local-pos frame-header-size len))]
                     (when (and (pos? len) (<= end cap))
                       ;; One duplicate, one slice — used for both CRC validation
                       ;; and returned as the payload (rewound, made read-only).
