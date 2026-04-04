@@ -170,22 +170,6 @@ Byte:  0       1       2-5             6-9            10..N          N+1..aligne
 - `CRC32C` — checksum of payload bytes (big-endian int32)
 - Total frame size is padded to the next 8-byte boundary
 
-## Threading model
-
-| Component | Thread safety |
-|-----------|---------------|
-| `enqueue!` | Single writer only |
-| `poll!` / `ack!` / `nack!` / `seek!` | Single thread per `ConsumerGroup` |
-| Multiple `ConsumerGroup`s on one `Queue` | Safe — fully independent |
-| `close-queue!` / `close-consumer-group!` | Call from the owner thread after stopping work |
-
-Two daemon background threads are started when `:async` strategy is in use:
-
-- `k7-commit` — periodically fsyncs the active segment for the queue
-- `k7-cursor-<group>` — periodically fsyncs the cursor file for a consumer group
-
-Both stop cleanly on close, flushing any pending data before exiting.
-
 ## Performance
 
 Measured on Apple M-series, JVM 21, G1GC, 32-byte payloads.
@@ -223,7 +207,29 @@ this hardware).
 the read-only `ByteBuffer` slice returned as the payload (~192 bytes); the
 pending-offset tracking and CRC32C checksum contribute zero allocation.
 
-### Thread-safety rationale
+## Threading model
+
+| Component | Thread safety |
+|-----------|---------------|
+| `enqueue!` | Single writer only |
+| `poll!` / `ack!` / `nack!` / `seek!` | Single thread per `ConsumerGroup` |
+| Multiple `ConsumerGroup`s on one `Queue` | Safe — fully independent |
+| `close-queue!` / `close-consumer-group!` | Call from the owner thread after stopping work |
+
+Two daemon background threads are started when `:async` strategy is in use:
+
+- `k7-commit` — periodically fsyncs the active segment for the queue
+- `k7-cursor-<group>` — periodically fsyncs the cursor file for a consumer group
+
+Both stop cleanly on close, flushing any pending data before exiting.
+
+
+### Rationale
+
+This is the same ownership model used by [LMAX Disruptor](https://lmax-exchange.github.io/disruptor/)
+and [Chronicle Queue](https://github.com/OpenHFT/Chronicle-Queue): push
+coordination responsibility to the caller so the library's hot path stays
+allocation-free and contention-free.
 
 **Single writer.** `enqueue!` requires external synchronization if called from
 multiple threads. When only one thread ever calls it, the hot path is entirely
@@ -236,11 +242,6 @@ read-head are all private to one `ConsumerGroup` and updated together as a unit.
 Keeping them on one thread means none of that state needs synchronization.
 Readers don't share anything with each other, so opening multiple consumer
 groups is fully concurrent with no extra cost.
-
-This is the same ownership model used by [LMAX Disruptor](https://lmax-exchange.github.io/disruptor/)
-and [Chronicle Queue](https://github.com/OpenHFT/Chronicle-Queue): push
-coordination responsibility to the caller so the library's hot path stays
-allocation-free and contention-free.
 
 ### Writing from multiple threads
 
