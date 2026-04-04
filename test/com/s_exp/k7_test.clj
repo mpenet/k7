@@ -31,7 +31,7 @@
   ([cg] (poll-all cg {}))
   ([cg opts]
    (let [batch (k7/poll! cg (merge {:max-batch 256 :timeout-ms 20} opts))]
-     (doseq [^Msg m batch] (k7/ack! cg (.offset m)))
+     (doseq [^Msg m batch] (k7/ack! cg m))
      (msgs->strings batch))))
 
 (defn wait-committed
@@ -73,7 +73,7 @@
           (is (< o2 o3))
           (let [batch (k7/poll! cg {:max-batch 10 :timeout-ms 20})]
             (is (= [o1 o2 o3] (mapv #(.offset ^Msg %) batch)))
-            (doseq [^Msg m batch] (k7/ack! cg (.offset m)))))))))
+            (doseq [^Msg m batch] (k7/ack! cg m))))))))
 
 (deftest test-large-payload
   (let [dir (tmp-dir)
@@ -83,7 +83,7 @@
         (k7/enqueue! q data)
         (let [[^Msg m] (k7/poll! cg {:max-batch 1 :timeout-ms 20})]
           (is (= 65536 (.remaining (.payload m))))
-          (k7/ack! cg (.offset m)))))))
+          (k7/ack! cg m))))))
 
 (deftest test-many-messages
   (let [dir (tmp-dir)
@@ -94,7 +94,7 @@
           (k7/enqueue! q (.getBytes (str i))))
         (let [batch (k7/poll! cg {:max-batch n :timeout-ms 50})]
           (is (= n (count batch)))
-          (doseq [^Msg m batch] (k7/ack! cg (.offset m))))))))
+          (doseq [^Msg m batch] (k7/ack! cg m)))))))
 
 ;;; ============================================================
 ;;; Payload zero-copy
@@ -107,7 +107,7 @@
         (k7/enqueue! q (.getBytes "readonly"))
         (let [[^Msg m] (k7/poll! cg {:max-batch 1 :timeout-ms 20})]
           (is (.isReadOnly (.payload m)))
-          (k7/ack! cg (.offset m)))))))
+          (k7/ack! cg m))))))
 
 ;;; ============================================================
 ;;; Ack / nack
@@ -120,7 +120,7 @@
         (k7/enqueue! q (.getBytes "x"))
         (let [[^Msg m] (k7/poll! cg {:max-batch 1 :timeout-ms 20})]
           (is (= 0 (.getLong ^ByteBuffer (.cursor-mmap ^ConsumerGroup cg) 0)))
-          (k7/ack! cg (.offset m))
+          (k7/ack! cg m)
           (is (pos? (.getLong ^ByteBuffer (.cursor-mmap ^ConsumerGroup cg) 0))))))))
 
 (deftest test-nack-redelivers
@@ -129,11 +129,11 @@
       (with-consumer [cg q "g" {}]
         (k7/enqueue! q (.getBytes "retry-me"))
         (let [[^Msg m1] (k7/poll! cg {:max-batch 1 :timeout-ms 20})]
-          (k7/nack! cg (.offset m1))
+          (k7/nack! cg m1)
           (let [[^Msg m2] (k7/poll! cg {:max-batch 1 :timeout-ms 20})]
             (is (= (.offset m1) (.offset m2)))
             (is (= "retry-me" (String. (k7/payload->bytes (.payload m2)))))
-            (k7/ack! cg (.offset m2))))))))
+            (k7/ack! cg m2)))))))
 
 (deftest test-partial-ack-cursor
   ;; ack out-of-order: cursor should only advance to contiguous prefix
@@ -145,14 +145,14 @@
         (k7/enqueue! q (.getBytes "c"))
         (let [[m1 m2 m3] (k7/poll! cg {:max-batch 3 :timeout-ms 20})]
           ;; ack m2 first — cursor should stay at m1's offset (gap)
-          (k7/ack! cg (.offset ^Msg m2))
+          (k7/ack! cg m2)
           (let [cursor-after-m2 (.getLong ^ByteBuffer (.cursor-mmap ^ConsumerGroup cg) 0)]
             (is (= (.offset ^Msg m1) cursor-after-m2)))
           ;; ack m1 — cursor should advance past m2 too
-          (k7/ack! cg (.offset ^Msg m1))
+          (k7/ack! cg m1)
           (let [cursor-after-m1 (.getLong ^ByteBuffer (.cursor-mmap ^ConsumerGroup cg) 0)]
             (is (= (.offset ^Msg m3) cursor-after-m1)))
-          (k7/ack! cg (.offset ^Msg m3)))))))
+          (k7/ack! cg m3))))))
 
 ;;; ============================================================
 ;;; Seek
@@ -212,7 +212,7 @@
       (with-consumer [cg q "g" {:cursor-fsync-strategy :sync}]
         ;; consume and ack only first message
         (let [[^Msg m] (k7/poll! cg {:max-batch 1 :timeout-ms 20})]
-          (k7/ack! cg (.offset m)))))
+          (k7/ack! cg m))))
     ;; reopen — consumer should resume from after "a"
     (with-queue [q2 dir {:fsync-strategy :flush}]
       (with-consumer [cg2 q2 "g" {:cursor-fsync-strategy :sync}]
@@ -258,7 +258,7 @@
           (k7/enqueue! q (.getBytes "x")))
         (let [batch (k7/poll! cg {:max-batch 5 :timeout-ms 20})]
           (is (= 5 (count batch)))
-          (doseq [^Msg m batch] (k7/ack! cg (.offset m))))))))
+          (doseq [^Msg m batch] (k7/ack! cg m)))))))
 
 (deftest test-poll-returns-partial-on-timeout
   (let [dir (tmp-dir)]
@@ -267,7 +267,7 @@
         (k7/enqueue! q (.getBytes "only-one"))
         (let [batch (k7/poll! cg {:max-batch 100 :timeout-ms 20})]
           (is (= 1 (count batch)))
-          (doseq [^Msg m batch] (k7/ack! cg (.offset m))))))))
+          (doseq [^Msg m batch] (k7/ack! cg m)))))))
 
 ;;; ============================================================
 ;;; Frame integrity

@@ -38,7 +38,7 @@
   "Poll and ack all available messages, return count."
   ^long [^ConsumerGroup cg max-batch]
   (let [batch (k7/poll! cg {:max-batch max-batch :timeout-ms 50 :park-ns 0})]
-    (doseq [^Msg m batch] (k7/ack! cg (.offset m)))
+    (doseq [^Msg m batch] (k7/ack! cg m))
     (count batch)))
 
 (defn- enqueue-n! [q ^bytes payload n]
@@ -93,7 +93,7 @@
         (crit/bench
          (do (k7/enqueue! q payload)
              (let [[^Msg m] (k7/poll! cg {:max-batch 1 :timeout-ms 5 :park-ns 0})]
-               (when m (k7/ack! cg (.offset m)))))
+               (when m (k7/ack! cg m))))
          :os :runtime)))))
 
 ;;; ============================================================
@@ -186,7 +186,7 @@
         (let [consumed (volatile! 0)]
           (while (< @consumed n)
             (let [batch (k7/poll! cg {:max-batch 1024 :timeout-ms 100 :park-ns 0})]
-              (doseq [^Msg m batch] (k7/ack! cg (.offset m)))
+              (doseq [^Msg m batch] (k7/ack! cg m))
               (vswap! consumed + (count batch))))
           (let [elapsed-s (/ (- (System/nanoTime) start) 1e9)]
             (println (format "  msgs: %d  elapsed: %.3fs  throughput: %.0f msg/s  %.1f MB/s"

@@ -520,11 +520,12 @@
     (lss-first pending)))
 
 (defn ack!
-  "Acknowledge a delivered message by its global offset.
+  "Acknowledge a delivered message.
    Updates cursor asynchronously via flush thread.
    Not thread-safe: must be called from the same thread as poll!."
-  [^ConsumerGroup cg ^long global-offset]
-  (let [^ILongSortedSet p (.getPending cg)
+  [^ConsumerGroup cg ^Msg msg]
+  (let [global-offset (.offset msg)
+        ^ILongSortedSet p (.getPending cg)
         _ (lss-remove! p global-offset)
         frontier (contiguous-frontier p (.get ^AtomicLong (.read-head cg)))]
     (write-cursor! cg frontier)))
@@ -545,11 +546,12 @@
 (defn nack!
   "Negative-ack: rewinds read-head so the message is redelivered.
    Not thread-safe: must be called from the same thread as poll!."
-  [^ConsumerGroup cg ^long global-offset]
-  (lss-remove! (.getPending cg) global-offset)
-  (let [cur (.get ^AtomicLong (.read-head cg))]
-    (when (< global-offset cur)
-      (.set ^AtomicLong (.read-head cg) global-offset))))
+  [^ConsumerGroup cg ^Msg msg]
+  (let [global-offset (.offset msg)]
+    (lss-remove! (.getPending cg) global-offset)
+    (let [cur (.get ^AtomicLong (.read-head cg))]
+      (when (< global-offset cur)
+        (.set ^AtomicLong (.read-head cg) global-offset)))))
 
 ;;; ============================================================
 ;;; Reader
@@ -680,7 +682,7 @@
   (let [batch (poll! cg {:max-batch 10 :timeout-ms 5})]
     (doseq [^Msg msg batch]
       (println "offset:" (.offset msg) "msg:" (String. (payload->bytes (.payload msg))))
-      (ack! cg (.offset msg))))
+      (ack! cg msg)))
 
   (.getLong ^ByteBuffer (.cursor-mmap ^ConsumerGroup cg) 0)
 

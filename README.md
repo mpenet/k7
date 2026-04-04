@@ -21,7 +21,7 @@ fsync strategies.
 - **Crash recovery** — segments are scanned on open; the last valid CRC32C-verified frame is found automatically
 - **Configurable fsync strategy** per queue (`:async`, `:flush`, `:sync`) and per consumer group
 - **`java.io.Closeable`** — both `Queue` and `ConsumerGroup` work with `with-open`
-- **Low allocation** — `enqueue!` is zero-alloc; `poll!` allocates only the read-only `ByteBuffer` slice per message; pending-offset tracking uses a primitive `long[]` with no boxing
+- **Low allocation** — `enqueue!` is zero-alloc; `poll!` allocates only the read-only `ByteBuffer` slice per message
 
 
 ## Installation
@@ -48,7 +48,7 @@ fsync strategies.
   (let [batch (k7/poll! cg {:max-batch 10 :timeout-ms 50})]
     (doseq [msg batch]
       (println (k7/msg-offset msg) "->" (String. (k7/payload->bytes (k7/msg-payload msg))))
-      (k7/ack! cg (k7/msg-offset msg)))))
+      (k7/ack! cg msg))))
 ```
 
 ## API
@@ -95,8 +95,8 @@ Multiple groups are fully independent and each maintains its own crash-safe curs
 ```clojure
 (k7/poll! cg)
 (k7/poll! cg opts)    ; => vector of Msg
-(k7/ack!  cg offset)  ; advance committed cursor
-(k7/nack! cg offset)  ; rewind for redelivery
+(k7/ack!  cg msg)     ; advance committed cursor
+(k7/nack! cg msg)     ; rewind for redelivery
 (k7/seek! cg offset)  ; reset read position (0 = replay from beginning)
 (k7/close-consumer-group! cg)
 ```
@@ -124,13 +124,7 @@ To copy the payload to a byte array:
 (k7/payload->bytes (k7/msg-payload msg))
 ```
 
-### Utilities
-
-```clojure
-(k7/aligned-frame-size payload-len)  ; on-disk size for a payload of this length
-```
-
-## Fsync strategies
+## fsync strategies
 
 Both `open-queue` (`:fsync-strategy`) and `open-consumer-group`
 (`:cursor-fsync-strategy`) accept the same three values:
@@ -229,14 +223,169 @@ this hardware).
 the read-only `ByteBuffer` slice returned as the payload (~192 bytes); the
 pending-offset tracking and CRC32C checksum contribute zero allocation.
 
+### Thread-safety rationale
+
+**Single writer.** `enqueue!` requires external synchronization if called from
+multiple threads. When only one thread ever calls it, the hot path is entirely
+free of locks, CAS loops, and memory fences: writing a frame and advancing the
+write position becomes a plain array write followed by a single lightweight
+atomic publish. Readers on other threads pick up the new position automatically.
+
+**Single thread per `ConsumerGroup`.** The cursor, pending-offset set, and
+read-head are all private to one `ConsumerGroup` and updated together as a unit.
+Keeping them on one thread means none of that state needs synchronization.
+Readers don't share anything with each other, so opening multiple consumer
+groups is fully concurrent with no extra cost.
+
+This is the same ownership model used by [LMAX Disruptor](https://lmax-exchange.github.io/disruptor/)
+and [Chronicle Queue](https://github.com/OpenHFT/Chronicle-Queue): push
+coordination responsibility to the caller so the library's hot path stays
+allocation-free and contention-free.
+
+### Writing from multiple threads
+
+`enqueue!` must be called from a single thread. Two options for multiple producers:
+
+**Lock** — simplest approach, fine when `enqueue!` is fast (`:flush` /
+`:async`), this way thread context doesn't matter, you can have multiple producers:
+
+```clojure
+(future 
+  (locking q
+    (k7/enqueue! q data)))
+```
+
+**Dedicated writer thread** — better when producers are latency-sensitive or
+when using `:sync` strategy (where each write blocks for an fsync). Producers
+hand off data and return immediately; the writer thread drains the inbox:
+
+```clojure
+(let [inbox (java.util.concurrent.LinkedBlockingQueue.)]
+  ;; writer thread owns the Queue
+  (future
+    (loop []
+      (when-let [data (.take inbox)]
+        (k7/enqueue! q data)
+        (recur))))
+
+  ;; any thread can now safely produce
+  (.put inbox (.getBytes "hello"))
+  (.put inbox (.getBytes "world")))
+```
+
+### Consuming from multiple threads
+
+If you need to fan out work to a thread pool, the natural pattern is a single
+**reader thread** that owns the `ConsumerGroup` and dispatches payloads to
+workers. Acks are collected back on the same thread:
+
+```clojure
+(let [results (java.util.concurrent.LinkedBlockingQueue.)]
+
+  ;; reader thread owns the ConsumerGroup
+  (future
+    (loop []
+      (doseq [msg (k7/poll! cg {:max-batch 64 :timeout-ms 5})]
+        (future
+          (process (k7/msg-payload msg))
+          ;; hand msg back for acking
+          (.put results msg)))
+      ;; drain completed msgs and ack on the reader thread
+      (loop []
+        (when-let [msg (.poll results)]
+          (k7/ack! cg msg)
+          (recur)))
+      (recur))))
+```
+
+Alternatively, open one `ConsumerGroup` per worker thread — each will track its
+own cursor independently and progress at its own pace.
+
+## core.async integration (`s-exp.k7.async`)
+
+The `s-exp.k7.async` namespace provides two higher-level helpers built on top of
+the core threading rules. Requires `org.clojure/core.async` on the classpath.
+
+### `sink!`
+
+```clojure
+(require '[s-exp.k7.async :as k7a])
+
+(k7a/sink! q ch)
+```
+
+Blocks the calling thread, taking byte arrays from `ch` and calling `enqueue!`
+on `q` until `ch` is closed. Wrap in `a/thread` or `future` to run in the
+background.
+
+### `producer-chan`
+
+```clojure
+(k7a/producer-chan q)
+(k7a/producer-chan q :ch custom-ch)
+```
+
+Starts a dedicated writer thread and returns a channel. Put byte arrays onto the
+channel from any thread; close it to stop the writer.
+
+Multiple `producer-chan`s on the same queue are safe — each serializes its
+`enqueue!` calls with a lock on `q`. For single-producer use, prefer `sink!`
+which avoids locking entirely.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `:ch` | `(a/chan 256)` | Supply your own input channel |
+
+```clojure
+(let [ch (k7a/producer-chan q)]
+  ;; put from any thread
+  (a/put! ch (.getBytes "hello"))
+  (a/put! ch (.getBytes "world"))
+  (a/close! ch))  ; stops the writer
+```
+
+### `consumer-group-chan`
+
+```clojure
+(k7a/consumer-group-chan q group-id & opts)
+```
+
+Opens a `ConsumerGroup` on `q` for `group-id` and starts a dedicated reader
+thread that polls and delivers `Msg` values onto a channel. Messages are
+auto-acked immediately after being placed on the output channel (at-most-once
+delivery).
+
+Returns a map:
+
+| Key | Description |
+|-----|-------------|
+| `:ch` | `core.async` channel of `Msg` values |
+| `:stop-ch` | promise-chan; put any value to stop the consumer |
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `:ch` | `(a/chan 256)` | Supply your own output channel |
+| `:poll-opts` | `{:max-batch 64 :timeout-ms 5}` | Passed to `k7/poll!` |
+| `:cg-opts` | `{}` | Passed to `k7/open-consumer-group` |
+
+Stop by putting onto `:stop-ch` or by closing `:ch`. The `ConsumerGroup` is
+closed before the reader thread exits.
+
+```clojure
+(let [c (k7a/consumer-group-chan q "workers"
+                                 :poll-opts {:max-batch 32 :timeout-ms 10})]
+  ;; consume
+  (a/<!! (:ch c))   ; => Msg
+
+  ;; stop
+  (a/put! (:stop-ch c) true))
+```
+
 ## Development
 
 ```bash
 # Run tests
 clojure -M:test -m cognitect.test-runner -d test
-
-# Start a REPL
-clojure -M:nrepl
 
 # Run benchmarks (criterium)
 clojure -M:bench-run
