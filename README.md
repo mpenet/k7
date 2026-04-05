@@ -179,12 +179,10 @@ Measured on Apple M-series, JVM 21, G1GC, 32-byte payloads.
 | Strategy | Throughput |
 |----------|------------|
 | `:flush` | ~16.6M msg/s |
-| `:async` | ~2.4M msg/s |
+| `:async` | ~5.0M msg/s |
 | `:sync` | ~3.7K msg/s |
 
-`:async` throughput is limited by the `LockSupport/unpark` call on each write
-waking the commit thread. `:sync` is bounded by `msync` latency (~267µs/call on
-this hardware).
+`:sync` is bounded by `msync` latency (~267µs/call on this hardware).
 
 **`poll+ack` throughput (batch=64):**
 

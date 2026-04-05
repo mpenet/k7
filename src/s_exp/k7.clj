@@ -42,61 +42,90 @@
 ;;; Primitive pending-offset set
 ;;; ============================================================
 
-;; LongSortedSet: a sorted set of long primitives backed by a long[].
+;; LongRingBuffer: a FIFO queue of long primitives for tracking pending offsets.
 ;;
-;; Offsets are always added in increasing order (poll! reads sequentially),
-;; so add! is a simple append. remove! does a binary search + compact shift.
-;; This avoids Long boxing and TreeSet node allocation on every message.
+;; Offsets are always added in ascending order (poll! reads sequentially).
+;; In the common case (ack in-order) the removed offset is always at the head,
+;; making both add and remove O(1) — just index increments, no data movement.
+;; Out-of-order removal (nack redelivery) falls back to a linear scan + single
+;; element removal, which is rare in practice.
+;;
+;; Capacity is always a power of 2 so index wrapping uses a bitmask instead
+;; of modulo. Grows by doubling when full, copying in logical order.
 ;;
 ;; definterface exposes typed methods so callers get direct invokevirtual
 ;; with no reflection. set! on ^:unsynchronized-mutable fields is only
 ;; allowed inside the deftype body, so all mutation lives in the impl below.
 ;;
 ;; All operations are single-threaded (consumer-group constraint).
-(definterface ILongSortedSet
-  (^void lssAdd [^long v])
-  (^void lssRemove [^long v])
-  (^long lssFirst [])
-  (^boolean lssEmpty [])
-  (^void lssClear []))
+(definterface ILongRingBuffer
+  (^void lrbAdd [^long v])
+  (^void lrbRemove [^long v])
+  (^long lrbFirst [])
+  (^boolean lrbEmpty [])
+  (^void lrbClear []))
 
-(deftype LongSortedSet [^:unsynchronized-mutable ^longs data
-                        ^:unsynchronized-mutable ^int size]
-  ILongSortedSet
-  (lssAdd [this v]
-    (let [sz size
-          arr data]
-      (if (< sz (alength arr))
-        (do (aset arr sz v)
-            (set! size (unchecked-inc-int sz)))
-        ;; grow: double capacity
-        (let [new-cap (bit-shift-left (alength arr) 1)
-              new-arr (Arrays/copyOf arr new-cap)]
+(deftype LongRingBuffer [^:unsynchronized-mutable ^longs data
+                         ^:unsynchronized-mutable ^int head  ; index of first element
+                         ^:unsynchronized-mutable ^int tail] ; index of next write slot
+  ILongRingBuffer
+  (lrbAdd [this v]
+    (let [arr data
+          cap (alength arr)
+          mask (unchecked-dec-int cap)
+          sz (unchecked-subtract-int tail head)]
+      (if (< sz cap)
+        (do (aset arr (bit-and tail mask) v)
+            (set! tail (unchecked-inc-int tail)))
+        ;; grow: double capacity, copy in logical order
+        (let [new-cap (bit-shift-left cap 1)
+              new-arr (long-array new-cap)]
+          (dotimes [i sz]
+            (aset new-arr i (aget arr (bit-and (unchecked-add-int head i) mask))))
           (aset new-arr sz v)
           (set! data new-arr)
-          (set! size (unchecked-inc-int sz))))))
-  (lssRemove [this v]
-    (let [sz size
-          arr data
-          idx (Arrays/binarySearch arr 0 sz v)]
-      (when (>= idx 0)
-        (System/arraycopy arr (inc idx) arr idx (- sz idx 1))
-        (set! size (unchecked-dec-int sz)))))
-  (lssFirst [this] (aget data 0))
-  (lssEmpty [this] (== 0 size))
-  (lssClear [this] (set! size (int 0))))
+          (set! head (int 0))
+          (set! tail (unchecked-inc-int sz))))))
+  (lrbRemove [this v]
+    (let [arr data
+          cap (alength arr)
+          mask (unchecked-dec-int cap)
+          sz (unchecked-subtract-int tail head)]
+      (when (pos? sz)
+        ;; fast path: value is at head (in-order ack)
+        (if (== v (aget arr (bit-and head mask)))
+          (set! head (unchecked-inc-int head))
+          ;; slow path: scan for value, shift tail portion left by one
+          (loop [i 1]
+            (when (< i sz)
+              (if (== v (aget arr (bit-and (unchecked-add-int head i) mask)))
+                (do (loop [j i]
+                      (when (< j (unchecked-dec-int sz))
+                        (aset arr (bit-and (unchecked-add-int head j) mask)
+                              (aget arr (bit-and (unchecked-add-int head (unchecked-inc-int j)) mask)))
+                        (recur (unchecked-inc-int j))))
+                    (set! tail (unchecked-dec-int tail)))
+                (recur (unchecked-inc-int i)))))))))
+  (lrbFirst [this]
+    (aget data (bit-and head (unchecked-dec-int (alength data)))))
+  (lrbEmpty [this] (== head tail))
+  (lrbClear [this]
+    (set! head (int 0))
+    (set! tail (int 0))))
 
-(defn lss-new
-  "Create a new empty LongSortedSet with the given initial capacity."
-  (^LongSortedSet [] (lss-new 16))
-  (^LongSortedSet [^long init-cap]
-   (LongSortedSet. (long-array init-cap) 0)))
+(defn lrb-new
+  "Create a new empty LongRingBuffer with the given initial capacity (rounded up to power of 2)."
+  (^LongRingBuffer [] (lrb-new 16))
+  (^LongRingBuffer [^long init-cap]
+   ;; ensure power of 2
+   (let [cap (loop [c (int 1)] (if (>= c init-cap) c (recur (bit-shift-left c 1))))]
+     (LongRingBuffer. (long-array cap) 0 0))))
 
-(defn lss-add! [^ILongSortedSet lss ^long v] (.lssAdd lss v))
-(defn lss-remove! [^ILongSortedSet lss ^long v] (.lssRemove lss v))
-(defn lss-first ^long [^ILongSortedSet lss] (.lssFirst lss))
-(defn lss-empty? [^ILongSortedSet lss] (.lssEmpty lss))
-(defn lss-clear! [^ILongSortedSet lss] (.lssClear lss))
+(defn lrb-add! [^ILongRingBuffer lrb ^long v] (.lrbAdd lrb v))
+(defn lrb-remove! [^ILongRingBuffer lrb ^long v] (.lrbRemove lrb v))
+(defn lrb-first ^long [^ILongRingBuffer lrb] (.lrbFirst lrb))
+(defn lrb-empty? [^ILongRingBuffer lrb] (.lrbEmpty lrb))
+(defn lrb-clear! [^ILongRingBuffer lrb] (.lrbClear lrb))
 
 ;;; ============================================================
 ;;; Frame encoding / decoding
@@ -421,12 +450,12 @@
 (defn msg-payload ^ByteBuffer [^Msg m] (.payload m))
 
 ;; ICGState: typed accessors for the two volatile fields of ConsumerGroup.
-;;   pending             — mutable LongSortedSet, polled/acked on every message
+;;   pending             — mutable LongRingBuffer, polled/acked on every message
 ;;   cursor-flush-thread — set once at open, read on every :async ack
 ;; definterface methods compile to direct invokevirtual — no reflection, no wrapping.
 (definterface ICGState
-  (^s_exp.k7.ILongSortedSet getPending [])
-  (^void setPending [^s_exp.k7.ILongSortedSet lss])
+  (^s_exp.k7.ILongRingBuffer getPending [])
+  (^void setPending [^s_exp.k7.ILongRingBuffer lrb])
   (^Thread getCursorFlushThread [])
   (^void setCursorFlushThread [^Thread t]))
 
@@ -434,7 +463,7 @@
                         ^MappedByteBuffer cursor-mmap
                         ^FileChannel cursor-channel
                         ^AtomicLong read-head ; in-memory, tracks next-to-read
-                        ^:volatile-mutable ^ILongSortedSet pending
+                        ^:volatile-mutable ^ILongRingBuffer pending
                         ^Queue queue
                         cursor-dirty? ; atom: boolean, true when cursor needs flush
                         cursor-open? ; atom: boolean stop flag for flush thread
@@ -442,7 +471,7 @@
                         cursor-fsync-strategy]
   ICGState
   (getPending [_] pending)
-  (setPending [_ lss] (set! pending lss))
+  (setPending [_ lrb] (set! pending lrb))
   (getCursorFlushThread [_] cursor-flush-thread)
   (setCursorFlushThread [_ t] (set! cursor-flush-thread t))
   java.io.Closeable
@@ -473,7 +502,7 @@
              committed-off (.getLong ^ByteBuffer mmap 0)
              cg (ConsumerGroup. group-id mmap ch
                                 (AtomicLong. committed-off)
-                                (lss-new)
+                                (lrb-new)
                                 q
                                 (atom false)
                                 (atom true) ; cursor-open?
@@ -524,10 +553,10 @@
 (defn- contiguous-frontier
   "Lowest unacked offset (= safe commit point).
    If pending is empty the full read-head is committed."
-  ^long [^ILongSortedSet pending ^long read-head]
-  (if (lss-empty? pending)
+  ^long [^ILongRingBuffer pending ^long read-head]
+  (if (lrb-empty? pending)
     read-head
-    (lss-first pending)))
+    (lrb-first pending)))
 
 (defn ack!
   "Acknowledge a delivered message.
@@ -535,8 +564,8 @@
    Not thread-safe: must be called from the same thread as poll!."
   [^ConsumerGroup cg ^Msg msg]
   (let [global-offset (.offset msg)
-        ^ILongSortedSet p (.getPending cg)
-        _ (lss-remove! p global-offset)
+        ^ILongRingBuffer p (.getPending cg)
+        _ (lrb-remove! p global-offset)
         frontier (contiguous-frontier p (.get ^AtomicLong (.read-head cg)))]
     (write-cursor! cg frontier)))
 
@@ -549,7 +578,7 @@
      - any valid global offset (e.g. from a previous Msg)
      - 0 to replay from the beginning of the queue"
   [^ConsumerGroup cg ^long offset]
-  (lss-clear! (.getPending cg))
+  (lrb-clear! (.getPending cg))
   (.set ^AtomicLong (.read-head cg) offset)
   (write-cursor! cg offset))
 
@@ -558,7 +587,7 @@
    Not thread-safe: must be called from the same thread as poll!."
   [^ConsumerGroup cg ^Msg msg]
   (let [global-offset (.offset msg)]
-    (lss-remove! (.getPending cg) global-offset)
+    (lrb-remove! (.getPending cg) global-offset)
     (let [cur (.get ^AtomicLong (.read-head cg))]
       (when (< global-offset cur)
         (.set ^AtomicLong (.read-head cg) global-offset)))))
@@ -627,7 +656,7 @@
                           (let [frame-size (aligned-frame-size len)
                                 next-rh (+ rh frame-size)]
                             (.set ^AtomicLong (.read-head cg) next-rh)
-                            (lss-add! (.getPending cg) rh)
+                            (lrb-add! (.getPending cg) rh)
                             ;; read-only view: prevents callers from corrupting mmap data
                             (Msg. rh (-> slice .rewind .asReadOnlyBuffer))))))))))))))))
 
