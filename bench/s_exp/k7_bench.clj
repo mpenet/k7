@@ -41,6 +41,16 @@
     (doseq [^Msg m batch] (k7/ack! cg m))
     (count batch)))
 
+(defn- drain-all!
+  "Poll and ack until n messages consumed."
+  [^ConsumerGroup cg n]
+  (let [consumed (volatile! 0)]
+    (while (< @consumed n)
+      (let [batch (k7/poll! cg {:max-batch 1024 :timeout-ms 0 :park-ns 0})]
+        (when (seq batch)
+          (doseq [^Msg m batch] (k7/ack! cg m))
+          (vswap! consumed + (count batch)))))))
+
 (defn- enqueue-n! [q ^bytes payload n]
   (dotimes [_ n]
     (k7/enqueue! q payload)))
@@ -57,28 +67,31 @@
 (defn bench-enqueue-throughput []
   (let [payload (.getBytes "hello-world-benchmark-payload-32b!")
         n 10000]
-    (doseq [strategy [:flush :async :sync]]
+    ;; Skip :sync — it's disk-bound and takes minutes
+    (doseq [strategy [:flush :async]]
       (bench-title (str "enqueue! throughput  strategy=" (name strategy)
                         "  payload=32b  n=" n))
       (with-tmp-queue [q {:fsync-strategy strategy}]
-        (crit/bench
+        (crit/quick-bench
          (enqueue-n! q payload n)
-         :os :runtime :verbose)))))
+         :os :runtime)))))
 
 ;;; ============================================================
 ;;; 2. poll! throughput by batch size
 ;;; ============================================================
 
 (defn bench-poll-throughput []
+  ;; Pre-fill queue once; each iteration seeks back to 0 so we measure
+  ;; pure poll+ack with no enqueue cost (matches README methodology).
   (let [payload (.getBytes "bench-msg")
-        n 50000]
-    (doseq [batch-size [1 16 256 1024]]
+        n 5000]
+    (doseq [batch-size [1 16 64 256 1024]]
       (bench-title (str "poll! throughput  batch-size=" batch-size "  n=" n))
-      (with-tmp-queue+cg [q cg {:fsync-strategy :flush} {}]
-        ;; pre-fill queue
+      (with-tmp-queue+cg [q cg {:fsync-strategy :flush} {:cursor-fsync-strategy :async}]
         (enqueue-n! q payload n)
-        (crit/bench
-         (drain! cg batch-size)
+        (crit/quick-bench
+         (do (k7/seek! cg 0)
+             (drain-all! cg n))
          :os :runtime)))))
 
 ;;; ============================================================
@@ -90,7 +103,7 @@
     (doseq [strategy [:flush :sync]]
       (bench-title (str "round-trip latency  strategy=" (name strategy)))
       (with-tmp-queue+cg [q cg {:fsync-strategy strategy} {:cursor-fsync-strategy strategy}]
-        (crit/bench
+        (crit/quick-bench
          (do (k7/enqueue! q payload)
              (let [[^Msg m] (k7/poll! cg {:max-batch 1 :timeout-ms 5 :park-ns 0})]
                (when m (k7/ack! cg m))))
@@ -102,12 +115,12 @@
 
 (defn bench-large-payload []
   (let [payload (byte-array 65536 (byte 0x42))
-        n 1000]
+        n 100]
     (bench-title (str "large payload (64KB)  n=" n))
-    (with-tmp-queue+cg [q cg {:fsync-strategy :flush} {}]
-      (crit/bench
+    (with-tmp-queue+cg [q cg {:fsync-strategy :flush} {:cursor-fsync-strategy :async}]
+      (crit/quick-bench
        (do (enqueue-n! q payload n)
-           (drain! cg n))
+           (drain-all! cg n))
        :os :runtime))))
 
 ;;; ============================================================
@@ -116,17 +129,17 @@
 
 (defn bench-multi-consumer []
   (let [payload (.getBytes "shared")
-        n 10000
+        n 5000
         ngroups 4]
     (bench-title (str "multi-consumer  groups=" ngroups "  n=" n))
     (let [dir (str (Files/createTempDirectory "k7-bench-mc-" (make-array FileAttribute 0)))
           q   (k7/open-queue dir {:fsync-strategy :flush})
-          cgs (mapv #(k7/open-consumer-group q (str "g" %) {}) (range ngroups))]
+          cgs (mapv #(k7/open-consumer-group q (str "g" %) {:cursor-fsync-strategy :async}) (range ngroups))]
       (try
-        (enqueue-n! q payload n)
-        (crit/bench
-         (doseq [^ConsumerGroup cg cgs]
-           (drain! cg n))
+        (crit/quick-bench
+         (do (enqueue-n! q payload n)
+             (doseq [^ConsumerGroup cg cgs]
+               (drain-all! cg n)))
          :os :runtime)
         (finally
           (doseq [cg cgs] (k7/close-consumer-group! cg))
@@ -137,24 +150,21 @@
 ;;; ============================================================
 
 (defn bench-segment-roll []
-  ;; Compares normal enqueue cost vs the single enqueue that triggers a roll.
-  ;; Uses a large segment so criterium's warm-up phase never exhausts it.
+  ;; Use a small segment so we can fill it quickly each trial.
   (let [payload-size  1024
         payload       (byte-array payload-size (byte 0x42))
-        ;; Large enough that criterium's ~60 samples never fill it: 60 * 1 write = trivial
-        segment-size  (* 256 1024 1024)] ; 256MB default
+        ;; Small segment: ~200 messages per segment so fill is fast
+        segment-size  (* 256 1024)
+        trials        200
+        times         (long-array trials)]
     (bench-title "segment roll  — normal enqueue vs roll-triggering enqueue")
-    (println (format "  payload=%dB" payload-size))
+    (println (format "  payload=%dB  segment-size=%dKB" payload-size (quot segment-size 1024)))
     (println "\n  [baseline] normal enqueue (no roll):")
-    (with-tmp-queue [q {:fsync-strategy :flush :segment-size segment-size}]
-      (crit/bench (k7/enqueue! q payload) :os :runtime))
-    ;; For the roll itself: pre-fill to the last frame each iteration is impractical
-    ;; in criterium (too slow). Instead we time a single roll manually.
-    (println "\n  [roll] single segment-roll timing (manual, 1000 trials):")
+    (with-tmp-queue [q {:fsync-strategy :flush :segment-size (* 256 1024 1024)}]
+      (crit/quick-bench (k7/enqueue! q payload) :os :runtime))
+    (println (format "\n  [roll] single segment-roll timing (manual, %d trials):" trials))
     (let [frame-size   (s-exp.k7/aligned-frame-size payload-size)
-          msgs-per-seg (quot segment-size frame-size)
-          trials       1000
-          times        (long-array trials)]
+          msgs-per-seg (quot segment-size frame-size)]
       (dotimes [i trials]
         (let [dir (str (Files/createTempDirectory "k7-bench-roll-" (make-array FileAttribute 0)))
               q   (k7/open-queue dir {:fsync-strategy :flush :segment-size segment-size})]
@@ -183,16 +193,12 @@
     (with-tmp-queue+cg [q cg {:fsync-strategy :flush} {:cursor-fsync-strategy :flush}]
       (let [start (System/nanoTime)]
         (enqueue-n! q payload n)
-        (let [consumed (volatile! 0)]
-          (while (< @consumed n)
-            (let [batch (k7/poll! cg {:max-batch 1024 :timeout-ms 100 :park-ns 0})]
-              (doseq [^Msg m batch] (k7/ack! cg m))
-              (vswap! consumed + (count batch))))
-          (let [elapsed-s (/ (- (System/nanoTime) start) 1e9)]
-            (println (format "  msgs: %d  elapsed: %.3fs  throughput: %.0f msg/s  %.1f MB/s"
-                             n elapsed-s
-                             (/ n elapsed-s)
-                             (/ (* n (alength payload)) elapsed-s 1e6)))))))))
+        (drain-all! cg n)
+        (let [elapsed-s (/ (- (System/nanoTime) start) 1e9)]
+          (println (format "  msgs: %d  elapsed: %.3fs  throughput: %.0f msg/s  %.1f MB/s"
+                           n elapsed-s
+                           (/ n elapsed-s)
+                           (/ (* n (alength payload)) elapsed-s 1e6))))))))
 
 ;;; ============================================================
 ;;; Entry point

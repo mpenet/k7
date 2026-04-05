@@ -13,7 +13,7 @@ fsync strategies.
 
 ## Features
 
-- **High throughput** —  [~16M msg/s enqueue and ~6M msg/s poll+ack](#performance) (`:flush`, batch=64, Apple M1, JVM 21)
+- **High throughput** —  [~20M msg/s enqueue and ~5M msg/s poll+ack](#performance) (`:flush`, Apple M-series, JVM 20)
 - **Append-only log** backed by preallocated mmap'd segment files
 - **Zero-copy reads** — payloads are read-only `ByteBuffer` slices into the mmap
 - **Consumer groups** with independent cursors, each persisted in its own mmap'd file
@@ -172,34 +172,34 @@ Byte:  0       1       2-5             6-9            10..N          N+1..aligne
 
 ## Performance
 
-Measured on Apple M-series, JVM 21, G1GC, 32-byte payloads.
+Measured on Apple M-series, JVM 20, G1GC, 32-byte payloads.
 
 **`enqueue!` throughput:**
 
 | Strategy | Throughput |
 |----------|------------|
-| `:flush` | ~16.6M msg/s |
-| `:async` | ~5.0M msg/s |
+| `:flush` | ~19.8M msg/s |
+| `:async` | ~16.2M msg/s |
 | `:sync` | ~3.7K msg/s |
 
 `:sync` is bounded by `msync` latency (~267µs/call on this hardware).
-
-**`poll+ack` throughput (batch=64):**
-
-| Strategy | Throughput |
-|----------|------------|
-| `:flush` | ~6.2M msg/s |
-| `:async` | ~4.4M msg/s |
-| `:sync` | ~49K msg/s |
 
 **`poll+ack` throughput by batch size (`:flush`):**
 
 | Batch size | Throughput |
 |------------|------------|
-| 1 | ~2.2M msg/s |
-| 16 | ~4.2M msg/s |
-| 64 | ~6.2M msg/s |
-| 256 | ~4.3M msg/s |
+| 1 | ~5.3M msg/s |
+| 16 | ~5.1M msg/s |
+| 64 | ~5.2M msg/s |
+| 256 | ~5.1M msg/s |
+| 1024 | ~5.2M msg/s |
+
+**Round-trip latency** (single enqueue → poll → ack):
+
+| Strategy | Latency |
+|----------|---------|
+| `:flush` | ~200 ns |
+| `:sync` | ~205 µs |
 
 `enqueue!` is zero-alloc. Per-message allocation in `poll!` is dominated by
 the read-only `ByteBuffer` slice returned as the payload (~192 bytes); the
