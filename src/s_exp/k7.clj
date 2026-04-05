@@ -239,23 +239,30 @@
 
 (declare close-queue! close-consumer-group!)
 
-;; IQueueState: typed getter/setter for the commit thread volatile field.
+;; IQueueState: typed getter/setter for the commit thread volatile fields.
 ;; definterface methods are direct JVM calls — no reflection, no boxing.
 ;; The setter is only called once (at open time); the getter is on the hot path
 ;; for every :async enqueue!.
+;; commitParked tracks whether the commit thread is currently parked so
+;; enqueue! can skip unpark when the thread is already running.
 (definterface IQueueState
   (^Thread getCommitThread [])
-  (^void setCommitThread [^Thread t]))
+  (^void setCommitThread [^Thread t])
+  (^boolean getCommitParked [])
+  (^void setCommitParked [^boolean v]))
 
 (deftype Queue [^Path dir
                 ^long segment-size
                 segments ; atom: vector of Segment
                 ^:volatile-mutable ^Thread commit-thread
+                ^:volatile-mutable ^boolean commit-parked
                 open? ; atom: boolean
                 fsync-strategy]
   IQueueState
   (getCommitThread [_] commit-thread)
   (setCommitThread [_ t] (set! commit-thread t))
+  (getCommitParked [_] commit-parked)
+  (setCommitParked [_ v] (set! commit-parked v))
   java.io.Closeable
   (close [this] (close-queue! this)))
 
@@ -300,7 +307,7 @@
                 dir
                 (Paths/get ^String dir (make-array String 0)))
          _ (Files/createDirectories path (make-array FileAttribute 0))
-         q (Queue. path segment-size (atom []) nil (atom true) fsync-strategy)
+         q (Queue. path segment-size (atom []) nil false (atom true) fsync-strategy)
          existing (with-open [stream (Files/list path)]
                     (->> (.iterator stream)
                          iterator-seq
@@ -346,7 +353,10 @@
                                       (force-segment! seg)
                                       (.lazySet ^AtomicLong (.committed-pos seg) wp))))
                                 ;; park up to commit-interval-us; unparked early by enqueue!
+                                ;; signal parked so enqueue! knows to unpark us
+                                (.setCommitParked q true)
                                 (LockSupport/parkNanos (* ^long commit-interval-us 1000))
+                                (.setCommitParked q false)
                                 (recur seg)))))
                         "k7-commit")]
          (.setDaemon t true)
@@ -390,7 +400,7 @@
     ;; forming a happens-before edge per JMM without a full volatile fence.
     (.lazySet ^AtomicLong (.write-pos seg) next-pos)
     (case (.fsync-strategy q)
-      :async (LockSupport/unpark (.getCommitThread q))
+      :async (when (.getCommitParked q) (LockSupport/unpark (.getCommitThread q)))
       :flush (.lazySet ^AtomicLong (.committed-pos seg) next-pos)
       :sync (do (force-segment! seg)
                 (.set ^AtomicLong (.committed-pos seg) next-pos)))
@@ -606,7 +616,7 @@
                         payload-start (int (+ local-pos frame-header-size))
                         end (int (+ local-pos frame-header-size len))]
                     (when (and (pos? len) (<= end cap))
-                      ;; One duplicate, one slice — used for both CRC validation
+                      ;; One duplicate, one slice — reused for both CRC validation
                       ;; and returned as the payload (rewound, made read-only).
                       (let [dup (.duplicate mmap)
                             _ (-> dup (.position payload-start) (.limit end))
