@@ -4,7 +4,8 @@
 A high-performance disk-backed queue for Clojure. 
 <br/>
 <br/>
-[~20M msg/s enqueue and ~5M msg/s poll+ack](#performance) (`:flush`, Apple M-series, JVM 20).
+[~20M msg/s enqueue and ~5M msg/s poll+ack](#performance) 
+<br/> using `:flush` on Apple M1, JVM 20.
 
 <br/>
 
