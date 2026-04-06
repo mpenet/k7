@@ -3,8 +3,6 @@
 
 A high-performance disk-backed queue for Clojure. [~20M msg/s enqueue and ~5M msg/s poll+ack](#performance) (`:flush`, Apple M-series, JVM 20).
 
-⚠️ It's a WIP - use at your own risk.
-
 <br/>
 
 - **Append-only log** backed by preallocated mmap'd segment files
@@ -21,6 +19,8 @@ A high-performance disk-backed queue for Clojure. [~20M msg/s enqueue and ~5M ms
 ;; deps.edn
 {com.s-exp/k7 {:git/sha "..."}}
 ```
+
+⚠️ It's a WIP - use at your own risk. It's quite stable but I give no warranty on your data!
 
 ## Quick start
 
