@@ -68,14 +68,14 @@
      :ch          — supply your own channel; (a/chan 256) used if not provided
      :poll-opts   — map passed to k7/poll! (default: {:max-batch 64
                                                        :timeout-ms 5})
-     :cg-opts     — map passed to k7/open-consumer-group (default: {})"
+     :cg-opts     — map passed to k7/consumer-group (default: {})"
   [q group-id & {:keys [ch poll-opts cg-opts]}]
   (let [ch (or ch (a/chan 256))
         stop-ch (a/promise-chan)
         poll-opts (or poll-opts {:max-batch 64 :timeout-ms 5})
         cg-opts (or cg-opts {})]
     (a/thread
-      (with-open [cg (k7/open-consumer-group q group-id cg-opts)]
+      (with-open [cg (k7/consumer-group q group-id cg-opts)]
         (loop []
           (let [batch (k7/poll! cg poll-opts)
                 closed? (reduce (fn [_ msg]
@@ -93,7 +93,7 @@
      :stop-ch stop-ch}))
 
 (comment
-  (def q (k7/open-queue "/tmp/k7-async-test" {:fsync-strategy :flush}))
+  (def q (k7/queue "/tmp/k7-async-test" {:fsync-strategy :flush}))
 
   ;; producer — run on a dedicated thread, feed from any thread
   (def producer-ch (a/chan 1024))

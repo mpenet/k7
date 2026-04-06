@@ -17,14 +17,14 @@
 
 (defmacro with-tmp-queue [[q-sym opts] & body]
   `(let [dir# (str (Files/createTempDirectory "k7-bench-" (make-array FileAttribute 0)))
-         ~q-sym (k7/open-queue dir# ~opts)]
+         ~q-sym (k7/queue dir# ~opts)]
      (try ~@body
           (finally (k7/close-queue! ~q-sym)))))
 
 (defmacro with-tmp-queue+cg [[q-sym cg-sym q-opts cg-opts] & body]
   `(let [dir# (str (Files/createTempDirectory "k7-bench-" (make-array FileAttribute 0)))
-         ~q-sym (k7/open-queue dir# ~q-opts)
-         ~cg-sym (k7/open-consumer-group ~q-sym "bench" ~cg-opts)]
+         ~q-sym (k7/queue dir# ~q-opts)
+         ~cg-sym (k7/consumer-group ~q-sym "bench" ~cg-opts)]
      (try ~@body
           (finally
             (k7/close-consumer-group! ~cg-sym)
@@ -133,8 +133,8 @@
         ngroups 4]
     (bench-title (str "multi-consumer  groups=" ngroups "  n=" n))
     (let [dir (str (Files/createTempDirectory "k7-bench-mc-" (make-array FileAttribute 0)))
-          q   (k7/open-queue dir {:fsync-strategy :flush})
-          cgs (mapv #(k7/open-consumer-group q (str "g" %) {:cursor-fsync-strategy :async}) (range ngroups))]
+          q   (k7/queue dir {:fsync-strategy :flush})
+          cgs (mapv #(k7/consumer-group q (str "g" %) {:cursor-fsync-strategy :async}) (range ngroups))]
       (try
         (crit/quick-bench
          (do (enqueue-n! q payload n)
@@ -167,7 +167,7 @@
           msgs-per-seg (quot segment-size frame-size)]
       (dotimes [i trials]
         (let [dir (str (Files/createTempDirectory "k7-bench-roll-" (make-array FileAttribute 0)))
-              q   (k7/open-queue dir {:fsync-strategy :flush :segment-size segment-size})]
+              q   (k7/queue dir {:fsync-strategy :flush :segment-size segment-size})]
           (try
             (enqueue-n! q payload (dec msgs-per-seg))
             (let [t0 (System/nanoTime)]

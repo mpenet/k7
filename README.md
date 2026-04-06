@@ -31,8 +31,8 @@ A high-performance disk-backed queue for Clojure.
 (require '[s-exp.k7 :as k7])
 
 ;; Open a queue (creates the directory if needed)
-(with-open [q  (k7/open-queue "/var/data/my-queue" {:fsync-strategy :flush})
-            cg (k7/open-consumer-group q "workers")]
+(with-open [q  (k7/queue "/var/data/my-queue" {:fsync-strategy :flush})
+            cg (k7/consumer-group q "workers")]
 
   ;; Produce
   (k7/enqueue! q (.getBytes "hello"))
@@ -41,7 +41,7 @@ A high-performance disk-backed queue for Clojure.
   ;; Consume
   (let [batch (k7/poll! cg {:max-batch 10 :timeout-ms 50})]
     (doseq [msg batch]
-      (println (k7/msg-offset msg) "->" (String. (k7/payload->bytes (k7/msg-payload msg))))
+      (println (k7/msg->offset msg) "->" (String. (k7/payload->bytes (k7/msg->payload msg))))
       (k7/ack! cg msg))))
 ```
 
@@ -50,8 +50,8 @@ A high-performance disk-backed queue for Clojure.
 ### Queue
 
 ```clojure
-(k7/open-queue dir)
-(k7/open-queue dir opts)
+(k7/queue dir)
+(k7/queue dir opts)
 ```
 
 Opens or recovers a queue stored in `dir` (a `String` or `java.nio.file.Path`).
@@ -75,8 +75,8 @@ scanned and recovered.
 ### Consumer group
 
 ```clojure
-(k7/open-consumer-group q group-id)
-(k7/open-consumer-group q group-id opts)
+(k7/consumer-group q group-id)
+(k7/consumer-group q group-id opts)
 ```
 
 Opens or creates a named consumer group on queue `q`.
@@ -108,19 +108,19 @@ on the same queue.
 ### Messages
 
 ```clojure
-(k7/msg-offset  msg)  ; => long — global offset, used for ack/nack
-(k7/msg-payload msg)  ; => read-only ByteBuffer — zero-copy slice into mmap
+(k7/msg->offset  msg)  ; => long — global offset, used for ack/nack
+(k7/msg->payload msg)  ; => read-only ByteBuffer — zero-copy slice into mmap
 ```
 
 To copy the payload to a byte array:
 
 ```clojure
-(k7/payload->bytes (k7/msg-payload msg))
+(k7/payload->bytes (k7/msg->payload msg))
 ```
 
 ## fsync strategies
 
-Both `open-queue` (`:fsync-strategy`) and `open-consumer-group`
+Both `queue` (`:fsync-strategy`) and `consumer-group`
 (`:cursor-fsync-strategy`) accept the same three values:
 
 | Strategy | Durability | Throughput | Notes |
@@ -131,7 +131,7 @@ Both `open-queue` (`:fsync-strategy`) and `open-consumer-group`
 
 ## Crash recovery
 
-On `open-queue`, each segment file is scanned from byte 0. Every frame is
+On `queue`, each segment file is scanned from byte 0. Every frame is
 validated by magic byte, committed flag, and CRC32C checksum. The write position
 is advanced to the end of the last valid contiguous frame; any partial or torn
 writes beyond that point are silently discarded.
@@ -280,7 +280,7 @@ workers. Acks are collected back on the same thread:
     (loop []
       (doseq [msg (k7/poll! cg {:max-batch 64 :timeout-ms 5})]
         (future
-          (process (k7/msg-payload msg))
+          (process (k7/msg->payload msg))
           ;; hand msg back for acking
           (.put results msg)))
       ;; drain completed msgs and ack on the reader thread
@@ -359,7 +359,7 @@ Returns a map:
 |--------|---------|-------------|
 | `:ch` | `(a/chan 256)` | Supply your own output channel |
 | `:poll-opts` | `{:max-batch 64 :timeout-ms 5}` | Passed to `k7/poll!` |
-| `:cg-opts` | `{}` | Passed to `k7/open-consumer-group` |
+| `:cg-opts` | `{}` | Passed to `k7/consumer-group` |
 
 Stop by putting onto `:stop-ch` or by closing `:ch`. The `ConsumerGroup` is
 closed before the reader thread exits.

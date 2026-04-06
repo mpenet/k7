@@ -14,7 +14,7 @@
   (str (Files/createTempDirectory "k7-async-test-" (make-array FileAttribute 0))))
 
 (defmacro with-queue [[q-sym dir] & body]
-  `(let [~q-sym (k7/open-queue ~dir {:fsync-strategy :flush})]
+  `(let [~q-sym (k7/queue ~dir {:fsync-strategy :flush})]
      (try ~@body
           (finally (k7/close-queue! ~q-sym)))))
 
@@ -33,12 +33,12 @@
         (a/put! ch (.getBytes "world"))
         (a/close! ch)
         (a/<!! (a/thread (k7a/sink! q ch)))
-        (let [cg (k7/open-consumer-group q "g")]
+        (let [cg (k7/consumer-group q "g")]
           (try
             (let [batch (k7/poll! cg {:max-batch 10 :timeout-ms 100})]
               (is (= 2 (count batch)))
               (is (= ["hello" "world"]
-                     (mapv #(String. (k7/payload->bytes (k7/msg-payload %))) batch))))
+                     (mapv #(String. (k7/payload->bytes (k7/msg->payload %))) batch))))
             (finally (k7/close-consumer-group! cg))))))))
 
 (deftest test-sink-stops-on-close
@@ -49,7 +49,7 @@
           (a/put! ch (.getBytes (str i))))
         (a/close! ch)
         (a/<!! (a/thread (k7a/sink! q ch)))
-        (let [cg (k7/open-consumer-group q "g")]
+        (let [cg (k7/consumer-group q "g")]
           (try
             (is (= 50 (count (k7/poll! cg {:max-batch 100 :timeout-ms 200}))))
             (finally (k7/close-consumer-group! cg))))))))
@@ -67,12 +67,12 @@
         (a/close! ch)
         ;; wait for writer thread to finish
         (Thread/sleep 100)
-        (let [cg (k7/open-consumer-group q "g")]
+        (let [cg (k7/consumer-group q "g")]
           (try
             (let [batch (k7/poll! cg {:max-batch 10 :timeout-ms 100})]
               (is (= 2 (count batch)))
               (is (= ["hello" "world"]
-                     (mapv #(String. (k7/payload->bytes (k7/msg-payload %))) batch))))
+                     (mapv #(String. (k7/payload->bytes (k7/msg->payload %))) batch))))
             (finally (k7/close-consumer-group! cg))))))))
 
 (deftest test-producer-chan-custom-channel
@@ -84,7 +84,7 @@
         (a/>!! ch (.getBytes "x"))
         (a/close! ch)
         (Thread/sleep 100)
-        (let [cg (k7/open-consumer-group q "g")]
+        (let [cg (k7/consumer-group q "g")]
           (try
             (is (= 1 (count (k7/poll! cg {:max-batch 5 :timeout-ms 100}))))
             (finally (k7/close-consumer-group! cg))))))))
@@ -98,7 +98,7 @@
           (a/>!! ch (.getBytes (str i))))
         (a/close! ch)
         (Thread/sleep 100)
-        (let [cg (k7/open-consumer-group q "g")]
+        (let [cg (k7/consumer-group q "g")]
           (try
             (is (= n (count (k7/poll! cg {:max-batch n :timeout-ms 200}))))
             (finally (k7/close-consumer-group! cg))))))))
@@ -117,7 +117,7 @@
             received (atom [])]
         (dotimes [_ 3]
           (when-let [msg (a/<!! (:ch c))]
-            (swap! received conj (String. (k7/payload->bytes (k7/msg-payload msg))))))
+            (swap! received conj (String. (k7/payload->bytes (k7/msg->payload msg))))))
         (stop! c)
         (is (= #{"a" "b" "c"} (set @received)))))))
 
@@ -153,7 +153,7 @@
                                        :poll-opts {:max-batch 5 :timeout-ms 50})]
         (is (identical? custom-ch (:ch c)))
         (let [msg (a/<!! (:ch c))]
-          (is (= "x" (String. (k7/payload->bytes (k7/msg-payload msg))))))
+          (is (= "x" (String. (k7/payload->bytes (k7/msg->payload msg))))))
         (stop! c)))))
 
 (deftest test-consumer-group-chan-many-messages
@@ -166,7 +166,7 @@
             received (atom #{})]
         (dotimes [_ n]
           (when-let [msg (a/<!! (:ch c))]
-            (swap! received conj (String. (k7/payload->bytes (k7/msg-payload msg))))))
+            (swap! received conj (String. (k7/payload->bytes (k7/msg->payload msg))))))
         (stop! c)
         (is (= n (count @received)))
         (is (= (set (map str (range n))) @received))))))
@@ -180,7 +180,7 @@
             c2 (k7a/consumer-group-chan q "g2" :poll-opts {:max-batch 5 :timeout-ms 100})]
         (let [m1 (a/<!! (:ch c1))
               m2 (a/<!! (:ch c2))]
-          (is (= "shared" (String. (k7/payload->bytes (k7/msg-payload m1)))))
-          (is (= "shared" (String. (k7/payload->bytes (k7/msg-payload m2))))))
+          (is (= "shared" (String. (k7/payload->bytes (k7/msg->payload m1)))))
+          (is (= "shared" (String. (k7/payload->bytes (k7/msg->payload m2))))))
         (stop! c1)
         (stop! c2)))))

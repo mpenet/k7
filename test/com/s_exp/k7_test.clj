@@ -14,12 +14,12 @@
   (str (Files/createTempDirectory "k7-test-" (make-array FileAttribute 0))))
 
 (defmacro with-queue [[q-sym dir opts] & body]
-  `(let [~q-sym (k7/open-queue ~dir ~opts)]
+  `(let [~q-sym (k7/queue ~dir ~opts)]
      (try ~@body
           (finally (k7/close-queue! ~q-sym)))))
 
 (defmacro with-consumer [[cg-sym q group opts] & body]
-  `(let [~cg-sym (k7/open-consumer-group ~q ~group ~opts)]
+  `(let [~cg-sym (k7/consumer-group ~q ~group ~opts)]
      (try ~@body
           (finally (k7/close-consumer-group! ~cg-sym)))))
 

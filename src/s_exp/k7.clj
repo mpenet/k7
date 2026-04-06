@@ -317,7 +317,7 @@
     (swap! (.segments q) conj new-seg)
     new-seg))
 
-(defn open-queue
+(defn queue
   "Open (or recover) a queue stored at dir.
 
    Options:
@@ -327,7 +327,7 @@
                            :flush  no explicit fsync; rely on OS writeback; no crash guarantee
                            :sync   fsync on every enqueue!; max durability, lowest throughput
      :commit-interval-us — fsync interval in microseconds for :async (default 50)"
-  ([dir] (open-queue dir {}))
+  ([dir] (queue dir {}))
   ([dir {:keys [segment-size fsync-strategy commit-interval-us]
          :or {segment-size default-segment-size
               fsync-strategy :async
@@ -446,8 +446,8 @@
 ;; payload is a read-only ByteBuffer slice over the mmap.
 (deftype Msg [^long offset ^ByteBuffer payload])
 
-(defn msg-offset ^long [^Msg m] (.offset m))
-(defn msg-payload ^ByteBuffer [^Msg m] (.payload m))
+(defn msg->offset ^long [^Msg m] (.offset m))
+(defn msg->payload ^ByteBuffer [^Msg m] (.payload m))
 
 ;; ICGState: typed accessors for the two volatile fields of ConsumerGroup.
 ;;   pending             — mutable LongRingBuffer, polled/acked on every message
@@ -477,7 +477,7 @@
   java.io.Closeable
   (close [this] (close-consumer-group! this)))
 
-(defn open-consumer-group
+(defn consumer-group
   "Open or create a consumer group on queue q identified by group-id.
 
    Options:
@@ -485,7 +485,7 @@
                               :async  background thread fsyncs cursor on ack
                               :flush  cursor written to mmap but not fsynced (no crash guarantee)
                               :sync   cursor fsynced on every ack (slowest)"
-  ([q group-id] (open-consumer-group q group-id {}))
+  ([q group-id] (consumer-group q group-id {}))
   ([^Queue q ^String group-id {:keys [cursor-fsync-strategy]
                                :or {cursor-fsync-strategy :async}}]
    (let [path (cursor-path ^Path (.dir q) group-id)
@@ -711,8 +711,8 @@
 ;;; ============================================================
 
 (comment
-  (def q (open-queue "/tmp/k7-test"))
-  (def cg (open-consumer-group q "workers"))
+  (def q (queue "/tmp/k7-test"))
+  (def cg (consumer-group q "workers"))
 
   (enqueue! q (.getBytes "hello"))
   (enqueue! q (.getBytes "world"))
@@ -729,8 +729,8 @@
   (close-queue! q)
 
   ;; reopen — should resume from committed offset
-  (def q2 (open-queue "/tmp/k7-test"))
-  (def cg2 (open-consumer-group q2 "workers"))
+  (def q2 (queue "/tmp/k7-test"))
+  (def cg2 (consumer-group q2 "workers"))
   (poll! cg2 {:timeout-ms 5})
   (close-consumer-group! cg2)
   (close-queue! q2))
