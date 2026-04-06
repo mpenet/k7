@@ -3,7 +3,6 @@
            (java.nio.channels FileChannel FileChannel$MapMode)
            (java.nio.file Files Path Paths StandardOpenOption OpenOption)
            (java.nio.file.attribute FileAttribute)
-           (java.util Arrays)
            (java.util.concurrent.atomic AtomicLong)
            (java.util.concurrent.locks LockSupport)
            (java.util.function Supplier)
@@ -66,10 +65,10 @@
   (^void lrbClear []))
 
 (deftype LongRingBuffer [^:unsynchronized-mutable ^longs data
-                         ^:unsynchronized-mutable ^int head  ; index of first element
+                         ^:unsynchronized-mutable ^int head ; index of first element
                          ^:unsynchronized-mutable ^int tail] ; index of next write slot
   ILongRingBuffer
-  (lrbAdd [this v]
+  (lrbAdd [_this v]
     (let [arr data
           cap (alength arr)
           mask (unchecked-dec-int cap)
@@ -86,7 +85,7 @@
           (set! data new-arr)
           (set! head (int 0))
           (set! tail (unchecked-inc-int sz))))))
-  (lrbRemove [this v]
+  (lrbRemove [_this v]
     (let [arr data
           cap (alength arr)
           mask (unchecked-dec-int cap)
@@ -106,10 +105,10 @@
                         (recur (unchecked-inc-int j))))
                     (set! tail (unchecked-dec-int tail)))
                 (recur (unchecked-inc-int i)))))))))
-  (lrbFirst [this]
+  (lrbFirst [_this]
     (aget data (bit-and head (unchecked-dec-int (alength data)))))
-  (lrbEmpty [this] (== head tail))
-  (lrbClear [this]
+  (lrbEmpty [_this] (== head tail))
+  (lrbClear [_this]
     (set! head (int 0))
     (set! tail (int 0))))
 
@@ -177,18 +176,6 @@
                   crc ^CRC32C (.get tl-crc32c)
                   _ (doto crc (.reset) (.update ^ByteBuffer slice))]
               (== stored-crc (unchecked-int (.getValue crc))))))))))
-
-(defn read-frame-payload
-  "Return a read-only ByteBuffer slice over the payload — zero copy.
-   mmap is already BIG_ENDIAN; duplicate inherits byte order."
-  ^ByteBuffer [^ByteBuffer mmap ^long pos]
-  (let [len (.getInt mmap (int (+ pos 2)))]
-    (-> mmap
-        .duplicate
-        (.position (int (+ pos frame-header-size)))
-        (.limit (int (+ pos frame-header-size len)))
-        .slice
-        .asReadOnlyBuffer)))
 
 (defn frame-total-size ^long [^ByteBuffer buf ^long pos]
   (aligned-frame-size (.getInt buf (int (+ pos 2)))))
@@ -678,7 +665,7 @@
   ([^ConsumerGroup cg {:keys [max-batch timeout-ms park-ns]
                        :or {max-batch 256 timeout-ms 1 park-ns 10000}}]
    (let [deadline (+ (System/nanoTime) (long (* (double timeout-ms) 1e6)))
-         park-ns  (long park-ns)
+         park-ns (long park-ns)
          ;; cache current segment at poll start — refreshed on miss in try-read-one!
          cached-seg ^Segment (current-segment (.queue cg))]
      (loop [msgs (transient [])
