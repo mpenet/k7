@@ -379,7 +379,7 @@ closed before the reader thread exits.
 
 ```bash
 # Run tests
-clojure -M:test -m cognitect.test-runner -d test
+clojure -X:test
 
 # Run benchmarks (criterium)
 clojure -M:bench-run
