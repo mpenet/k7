@@ -1,4 +1,4 @@
-# k7
+# k7 - /kəˈsɛt/
 <img align="right" width="250" height="250" alt="b74cd8e1-e183-4521-9c34-68163a7bd26d" src="https://github.com/user-attachments/assets/dac4752e-2b7e-41ca-8477-0f70636f6357" />
 
 A high-performance disk-backed queue for Clojure. 
