@@ -1,34 +1,25 @@
 # k7
 <img align="right" width="250" height="250" alt="b74cd8e1-e183-4521-9c34-68163a7bd26d" src="https://github.com/user-attachments/assets/dac4752e-2b7e-41ca-8477-0f70636f6357" />
 
-⚠️ WIP - use at your own risk
+A high-performance disk-backed queue for Clojure. [~20M msg/s enqueue and ~5M msg/s poll+ack](#performance) (`:flush`, Apple M-series, JVM 20).
 
-A high-performance disk-backed queue for Clojure.
-
-Single writer, multiple independent consumer groups, zero-copy reads via
-memory-mapped files, adaptive batching, crash-safe cursors, and configurable
-fsync strategies.
+⚠️ It's a WIP - use at your own risk.
 
 <br/>
 
-## Features
-
-- **High throughput** —  [~20M msg/s enqueue and ~5M msg/s poll+ack](#performance) (`:flush`, Apple M-series, JVM 20)
 - **Append-only log** backed by preallocated mmap'd segment files
 - **Zero-copy reads** — payloads are read-only `ByteBuffer` slices into the mmap
-- **Consumer groups** with independent cursors, each persisted in its own mmap'd file
-- **Ack / nack / seek** — at-least-once delivery, redelivery on nack, arbitrary seek
+- **Single writer, multiple independent consumer groups** with crash-safe cursors persisted in their own mmap'd files
+- **Ack / nack / seek** — at-least-once delivery, redelivery on nack, arbitrary seek; adaptive batching on `poll!`
 - **Crash recovery** — segments are scanned on open; the last valid CRC32C-verified frame is found automatically
 - **Configurable fsync strategy** per queue (`:async`, `:flush`, `:sync`) and per consumer group
-- **`java.io.Closeable`** — both `Queue` and `ConsumerGroup` work with `with-open`
 - **Low allocation** — `enqueue!` is zero-alloc; `poll!` allocates only the read-only `ByteBuffer` slice per message
-
 
 ## Installation
 
 ```clojure
 ;; deps.edn
-{com.s-exp/k7 {:mvn/version "0.1.0"}}
+{com.s-exp/k7 {:git/sha "..."}}
 ```
 
 ## Quick start
@@ -68,7 +59,7 @@ scanned and recovered.
 |--------|---------|-------------|
 | `:segment-size` | `268435456` (256MB) | Bytes per segment file |
 | `:fsync-strategy` | `:async` | See fsync strategies below |
-| `:commit-interval-us` | `50` | Fsync interval in µs for `:async` strategy |
+| `:commit-interval-us` | `50` | fsync interval in µs for `:async` strategy |
 
 ```clojure
 (k7/enqueue! q ^bytes data)  ; => long global-offset
@@ -201,9 +192,9 @@ Measured on Apple M-series, JVM 20, G1GC, 32-byte payloads.
 | `:flush` | ~200 ns |
 | `:sync` | ~205 µs |
 
-`enqueue!` is zero-alloc. Per-message allocation in `poll!` is dominated by
-the read-only `ByteBuffer` slice returned as the payload (~192 bytes); the
-pending-offset tracking and CRC32C checksum contribute zero allocation.
+`enqueue!` is zero-alloc. Per-message allocation in `poll!` is dominated by the
+read-only `ByteBuffer` slice returned as the payload; the pending-offset
+tracking and CRC32C checksum contribute zero allocation.
 
 ## Threading model
 
@@ -245,7 +236,7 @@ groups is fully concurrent with no extra cost.
 
 `enqueue!` must be called from a single thread. Two options for multiple producers:
 
-**Lock** — simplest approach, fine when `enqueue!` is fast (`:flush` /
+**Locking** — simplest approach, fine when `enqueue!` is fast (`:flush` /
 `:async`), this way thread context doesn't matter, you can have multiple producers:
 
 ```clojure
