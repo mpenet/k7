@@ -4,9 +4,8 @@
 A high-performance disk-backed queue for Clojure. 
 <br/>
 <br/>
-[~20M msg/s enqueue and ~5M msg/s poll+ack](#performance) 
+[~20M msg/s enqueue and ~6.5M msg/s poll+ack](#performance) 
 <br/> using `:flush` on Apple M1, JVM 20 - [bench-output](https://github.com/mpenet/k7/blob/main/bench-output.txt).
-
 <br/>
 
 - **Append-only log** backed by preallocated mmap'd segment files
