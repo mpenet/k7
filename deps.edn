@@ -22,4 +22,7 @@
           :extra-deps {criterium/criterium {:mvn/version "0.4.6"}}}
   :bench-run {:extra-paths ["bench"]
               :extra-deps {criterium/criterium {:mvn/version "0.4.6"}}
-              :main-opts ["-m" "s-exp.k7-bench"]}}}
+              :main-opts ["-m" "s-exp.k7-bench"]}
+  :bench-run-long {:extra-paths ["bench"]
+                   :extra-deps {criterium/criterium {:mvn/version "0.4.6"}}
+                   :main-opts ["-m" "s-exp.k7-bench-long"]}}}
