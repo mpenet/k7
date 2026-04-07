@@ -163,7 +163,7 @@ Byte:  0       1       2-5             6-9            10..N          N+1..aligne
 
 ## Performance
 
-Measured on Apple M-series, JVM 20, G1GC, 32-byte payloads.
+Measured on Apple M1 Pro, JVM 20, G1GC, 32-byte payloads.
 
 **`enqueue!` throughput:**
 
