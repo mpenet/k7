@@ -19,10 +19,7 @@ A high-performance disk-backed queue for Clojure.
 
 ## Installation
 
-```clojure
-;; deps.edn
-{com.s-exp/k7 {:git/sha "..."}}
-```
+[![Clojars Project](https://img.shields.io/clojars/v/com.s-exp/k7.svg)](https://clojars.org/com.s-exp/k7)
 
 ⚠️ It's a WIP - use at your own risk. It's quite stable but I give no warranty on your data!
 

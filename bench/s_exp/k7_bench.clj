@@ -60,6 +60,18 @@
   (println (str "╔══ " title))
   (println))
 
+(defn- print-msgs-per-sec
+  "Print msg/s summary line from a criterium result map."
+  [result n]
+  (let [mean-s (first (:mean result))
+        msg-s  (/ n mean-s)]
+    (println (format "  => %s  (mean %.3fµs per batch of %d)"
+                     (if (>= msg-s 1e6)
+                       (format "%.2fM msg/s" (/ msg-s 1e6))
+                       (format "%.0f msg/s" msg-s))
+                     (* mean-s 1e6)
+                     n))))
+
 ;;; ============================================================
 ;;; 1. enqueue! throughput by fsync strategy
 ;;; ============================================================
@@ -72,9 +84,9 @@
       (bench-title (str "enqueue! throughput  strategy=" (name strategy)
                         "  payload=32b  n=" n))
       (with-tmp-queue [q {:fsync-strategy strategy}]
-        (crit/quick-bench
-         (enqueue-n! q payload n)
-         :os :runtime)))))
+        (let [result (crit/quick-benchmark (enqueue-n! q payload n) {:os true :runtime true})]
+          (crit/report-result result)
+          (print-msgs-per-sec result n))))))
 
 ;;; ============================================================
 ;;; 2. poll! throughput by batch size
@@ -89,10 +101,12 @@
       (bench-title (str "poll! throughput  batch-size=" batch-size "  n=" n))
       (with-tmp-queue+cg [q cg {:fsync-strategy :flush} {:cursor-fsync-strategy :async}]
         (enqueue-n! q payload n)
-        (crit/quick-bench
-         (do (k7/seek! cg 0)
-             (drain-all! cg n))
-         :os :runtime)))))
+        (let [result (crit/quick-benchmark
+                      (do (k7/seek! cg 0)
+                          (drain-all! cg n))
+                      {:os true :runtime true})]
+          (crit/report-result result)
+          (print-msgs-per-sec result n))))))
 
 ;;; ============================================================
 ;;; 3. Round-trip latency (single enqueue → poll → ack)
@@ -103,11 +117,13 @@
     (doseq [strategy [:flush :sync]]
       (bench-title (str "round-trip latency  strategy=" (name strategy)))
       (with-tmp-queue+cg [q cg {:fsync-strategy strategy} {:cursor-fsync-strategy strategy}]
-        (crit/quick-bench
-         (do (k7/enqueue! q payload)
-             (let [[^Msg m] (k7/poll! cg {:max-batch 1 :timeout-ms 5 :park-ns 0})]
-               (when m (k7/ack! cg m))))
-         :os :runtime)))))
+        (let [result (crit/quick-benchmark
+                      (do (k7/enqueue! q payload)
+                          (let [[^Msg m] (k7/poll! cg {:max-batch 1 :timeout-ms 5 :park-ns 0})]
+                            (when m (k7/ack! cg m))))
+                      {:os true :runtime true})]
+          (crit/report-result result)
+          (print-msgs-per-sec result 1))))))
 
 ;;; ============================================================
 ;;; 4. Large payload (64KB)
@@ -118,10 +134,12 @@
         n 100]
     (bench-title (str "large payload (64KB)  n=" n))
     (with-tmp-queue+cg [q cg {:fsync-strategy :flush} {:cursor-fsync-strategy :async}]
-      (crit/quick-bench
-       (do (enqueue-n! q payload n)
-           (drain-all! cg n))
-       :os :runtime))))
+      (let [result (crit/quick-benchmark
+                    (do (enqueue-n! q payload n)
+                        (drain-all! cg n))
+                    {:os true :runtime true})]
+        (crit/report-result result)
+        (print-msgs-per-sec result n)))))
 
 ;;; ============================================================
 ;;; 5. Multi-consumer groups (4 independent readers)
@@ -136,11 +154,13 @@
           q   (k7/queue dir {:fsync-strategy :flush})
           cgs (mapv #(k7/consumer-group q (str "g" %) {:cursor-fsync-strategy :async}) (range ngroups))]
       (try
-        (crit/quick-bench
-         (do (enqueue-n! q payload n)
-             (doseq [^ConsumerGroup cg cgs]
-               (drain-all! cg n)))
-         :os :runtime)
+        (let [result (crit/quick-benchmark
+                      (do (enqueue-n! q payload n)
+                          (doseq [^ConsumerGroup cg cgs]
+                            (drain-all! cg n)))
+                      {:os true :runtime true})]
+          (crit/report-result result)
+          (print-msgs-per-sec result (* n ngroups)))
         (finally
           (doseq [cg cgs] (k7/close-consumer-group! cg))
           (k7/close-queue! q))))))
@@ -161,7 +181,9 @@
     (println (format "  payload=%dB  segment-size=%dKB" payload-size (quot segment-size 1024)))
     (println "\n  [baseline] normal enqueue (no roll):")
     (with-tmp-queue [q {:fsync-strategy :flush :segment-size (* 256 1024 1024)}]
-      (crit/quick-bench (k7/enqueue! q payload) :os :runtime))
+      (let [result (crit/quick-benchmark (k7/enqueue! q payload) {:os true :runtime true})]
+        (crit/report-result result)
+        (print-msgs-per-sec result 1)))
     (println (format "\n  [roll] single segment-roll timing (manual, %d trials):" trials))
     (let [frame-size   (s-exp.k7/aligned-frame-size payload-size)
           msgs-per-seg (quot segment-size frame-size)]
@@ -195,9 +217,9 @@
         (enqueue-n! q payload n)
         (drain-all! cg n)
         (let [elapsed-s (/ (- (System/nanoTime) start) 1e9)]
-          (println (format "  msgs: %d  elapsed: %.3fs  throughput: %.0f msg/s  %.1f MB/s"
+          (println (format "  msgs: %d  elapsed: %.3fs  throughput: %.2fM msg/s  %.1f MB/s"
                            n elapsed-s
-                           (/ n elapsed-s)
+                           (/ n elapsed-s 1e6)
                            (/ (* n (alength payload)) elapsed-s 1e6))))))))
 
 ;;; ============================================================
