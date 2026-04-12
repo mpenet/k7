@@ -26,6 +26,10 @@
 ;; frame-align bytes is the maximum padding ever needed.
 (def ^:private ^bytes zero-pad (byte-array frame-align))
 
+;; Reusable copy-option array for atomic segment file renames.
+(def ^:private ^"[Ljava.nio.file.CopyOption;" atomic-move-opts
+  (into-array java.nio.file.CopyOption [java.nio.file.StandardCopyOption/ATOMIC_MOVE]))
+
 ;; Thread-local CRC32C instances — avoids per-message allocation on hot path.
 ;; CRC32C is not thread-safe, so each thread gets its own instance.
 ;; ThreadLocal/withInitial takes a Supplier — compiled to a direct interface call,
@@ -62,7 +66,8 @@
   (^void lrbRemove [^long v])
   (^long lrbFirst [])
   (^boolean lrbEmpty [])
-  (^void lrbClear []))
+  (^void lrbClear [])
+  (^long lrbFrontier [^long read-head]))
 
 (deftype LongRingBuffer [^:unsynchronized-mutable ^longs data
                          ^:unsynchronized-mutable ^int head ; index of first element
@@ -110,7 +115,11 @@
   (lrbEmpty [_this] (== head tail))
   (lrbClear [_this]
     (set! head (int 0))
-    (set! tail (int 0))))
+    (set! tail (int 0)))
+  (lrbFrontier [_this read-head]
+    (if (== head tail)
+      read-head
+      (aget data (bit-and head (unchecked-dec-int (alength data)))))))
 
 (defn lrb-new
   "Create a new empty LongRingBuffer with the given initial capacity (rounded up to power of 2)."
@@ -131,9 +140,8 @@
 ;;; ============================================================
 
 (defn aligned-frame-size ^long [^long payload-len]
-  (let [total (+ frame-header-size payload-len)
-        r (bit-and total frame-align-mask)]
-    (if (zero? r) total (+ total (- frame-align r)))))
+  (let [total (+ frame-header-size payload-len)]
+    (bit-and (+ total frame-align-mask) (bit-not frame-align-mask))))
 
 (defn write-frame!
   "Write a framed message into buf at position pos.
@@ -265,13 +273,19 @@
   (^Thread getCommitThread [])
   (^void setCommitThread [^Thread t])
   (^boolean getCommitParked [])
-  (^void setCommitParked [^boolean v]))
+  (^void setCommitParked [^boolean v])
+  (^s_exp.k7.Segment getCurrentSeg [])
+  (^void setCurrentSeg [^s_exp.k7.Segment seg])
+  (^s_exp.k7.Segment getNextSeg [])
+  (^void setNextSeg [^s_exp.k7.Segment seg]))
 
 (deftype Queue [^Path dir
                 ^long segment-size
                 segments ; atom: vector of Segment
                 ^:volatile-mutable ^Thread commit-thread
                 ^:volatile-mutable ^boolean commit-parked
+                ^:volatile-mutable ^Segment current-seg
+                ^:volatile-mutable ^Segment next-seg ; pre-created segment for fast roll
                 open? ; atom: boolean
                 fsync-strategy]
   IQueueState
@@ -279,6 +293,10 @@
   (setCommitThread [_ t] (set! commit-thread t))
   (getCommitParked [_] commit-parked)
   (setCommitParked [_ v] (set! commit-parked v))
+  (getCurrentSeg [_] current-seg)
+  (setCurrentSeg [_ seg] (set! current-seg seg))
+  (getNextSeg [_] next-seg)
+  (setNextSeg [_ seg] (set! next-seg seg))
   java.io.Closeable
   (close [this] (close-queue! this)))
 
@@ -289,19 +307,52 @@
   (.resolve dir (format "cursor-%s.k7" group-id)))
 
 (defn current-segment ^Segment [^Queue q]
-  (peek @(.segments q)))
+  (.getCurrentSeg q))
+
+(defn- precreate-next-segment!
+  "Pre-create the next segment file so roll-segment! can swap it in instantly.
+   The segment is created with a temporary filename and placeholder base-offset;
+   roll-segment! renames the file and wraps the resources with the correct metadata."
+  [^Queue q]
+  (when-not (.getNextSeg q)
+    (let [tmp-path (.resolve ^Path (.dir q) "seg-precreated.k7.tmp")
+          opts (into-array OpenOption
+                           [StandardOpenOption/READ
+                            StandardOpenOption/WRITE
+                            StandardOpenOption/CREATE])
+          ch (FileChannel/open tmp-path opts)]
+      (try
+        (let [ss (.segment-size q)]
+          (when (< (.size ch) ss)
+            (.write ch (ByteBuffer/allocate 1) (dec (long ss))))
+          (let [mmap (doto (.map ch FileChannel$MapMode/READ_WRITE 0 ss)
+                       (.order ByteOrder/BIG_ENDIAN))]
+            (.setNextSeg q (Segment. ch mmap tmp-path 0
+                                     (AtomicLong. 0) (AtomicLong. 0) ss))))
+        (catch Throwable t
+          (.close ch)
+          (throw t))))))
 
 (defn- roll-segment! ^Segment [^Queue q]
   (let [cur (peek @(.segments q))
         base (if cur
                (+ (.base-offset ^Segment cur) (.get ^AtomicLong (.write-pos ^Segment cur)))
                0)
-        new-seg (open-segment (segment-path ^Path (.dir q) base)
-                              base
-                              (.segment-size q))]
+        ;; Use pre-created segment resources if available — rename file, wrap with correct metadata
+        pre ^Segment (.getNextSeg q)
+        new-seg (if pre
+                  (let [target-path (segment-path ^Path (.dir q) base)]
+                    (.setNextSeg q nil)
+                    (Files/move ^Path (.path pre) target-path atomic-move-opts)
+                    (Segment. (.channel pre) (.mmap pre) target-path base
+                              (AtomicLong. 0) (AtomicLong. 0) (.capacity pre)))
+                  (open-segment (segment-path ^Path (.dir q) base)
+                                base
+                                (.segment-size q)))]
     (when cur
       (force-segment! cur))
     (swap! (.segments q) conj new-seg)
+    (.setCurrentSeg q new-seg)
     new-seg))
 
 (defn queue
@@ -323,7 +374,7 @@
                 dir
                 (Paths/get ^String dir (make-array String 0)))
          _ (Files/createDirectories path (make-array FileAttribute 0))
-         q (Queue. path segment-size (atom []) nil false (atom true) fsync-strategy)
+         q (Queue. path segment-size (atom []) nil false nil nil (atom true) fsync-strategy)
          existing (with-open [stream (Files/list path)]
                     (->> (.iterator stream)
                          iterator-seq
@@ -348,7 +399,8 @@
                                 (throw t))))
                           []
                           existing)]
-         (reset! (.segments q) segs))
+         (reset! (.segments q) segs)
+         (.setCurrentSeg q (peek segs)))
        (roll-segment! q))
      ;; commit thread only used for :async strategy
      (when (= fsync-strategy :async)
@@ -387,6 +439,12 @@
   (when-let [t (.getCommitThread q)]
     (LockSupport/unpark t)
     (.join t))
+  ;; Clean up unused pre-created segment if it was never rolled in.
+  (when-let [pre (.getNextSeg q)]
+    (.setNextSeg q nil)
+    (close-segment! pre)
+    ;; Delete the pre-created file since it was never used
+    (Files/deleteIfExists ^Path (.path ^Segment pre)))
   ;; Final flush: close-segment! calls mmap.force + channel.close for each segment.
   (doseq [seg @(.segments q)]
     (close-segment! seg)))
@@ -420,6 +478,14 @@
       :flush (.lazySet ^AtomicLong (.committed-pos seg) next-pos)
       :sync (do (force-segment! seg)
                 (.set ^AtomicLong (.committed-pos seg) next-pos)))
+    ;; Eagerly pre-create the next segment when this one passes the fill threshold.
+    ;; This is done synchronously on the writer thread (single-writer constraint)
+    ;; and only triggers once per segment (guarded by nil check in precreate-next-segment!).
+    ;; Integer comparison: threshold = capacity * 3/4 (avoids float division per write).
+    (when (and (nil? (.getNextSeg q))
+               (>= next-pos (unchecked-subtract (.capacity seg)
+                                                 (unsigned-bit-shift-right (.capacity seg) 2))))
+      (precreate-next-segment! q))
     global-off))
 
 ;;; ============================================================
@@ -444,7 +510,9 @@
   (^s_exp.k7.ILongRingBuffer getPending [])
   (^void setPending [^s_exp.k7.ILongRingBuffer lrb])
   (^Thread getCursorFlushThread [])
-  (^void setCursorFlushThread [^Thread t]))
+  (^void setCursorFlushThread [^Thread t])
+  (^boolean getCursorDirty [])
+  (^void setCursorDirty [^boolean v]))
 
 (deftype ConsumerGroup [^String id
                         ^MappedByteBuffer cursor-mmap
@@ -452,7 +520,7 @@
                         ^AtomicLong read-head ; in-memory, tracks next-to-read
                         ^:volatile-mutable ^ILongRingBuffer pending
                         ^Queue queue
-                        cursor-dirty? ; atom: boolean, true when cursor needs flush
+                        ^:volatile-mutable ^boolean cursor-dirty ; volatile boolean, set by consumer, read by flush thread
                         cursor-open? ; atom: boolean stop flag for flush thread
                         ^:volatile-mutable ^Thread cursor-flush-thread
                         cursor-fsync-strategy]
@@ -461,6 +529,8 @@
   (setPending [_ lrb] (set! pending lrb))
   (getCursorFlushThread [_] cursor-flush-thread)
   (setCursorFlushThread [_ t] (set! cursor-flush-thread t))
+  (getCursorDirty [_] cursor-dirty)
+  (setCursorDirty [_ v] (set! cursor-dirty v))
   java.io.Closeable
   (close [this] (close-consumer-group! this)))
 
@@ -491,7 +561,7 @@
                                 (AtomicLong. committed-off)
                                 (lrb-new)
                                 q
-                                (atom false)
+                                false
                                 (atom true) ; cursor-open?
                                 nil
                                 cursor-fsync-strategy)]
@@ -501,14 +571,14 @@
                             (fn []
                               ;; Run while open; on stop do one final flush if dirty.
                               (while @(.cursor-open? cg)
-                                (when @(.cursor-dirty? cg)
+                                (when (.getCursorDirty cg)
                                   (.force ^MappedByteBuffer (.cursor-mmap cg))
-                                  (reset! (.cursor-dirty? cg) false))
+                                  (.setCursorDirty cg false))
                                 (LockSupport/parkNanos 100000)) ; 100µs
                               ;; Final flush after stop signal
-                              (when @(.cursor-dirty? cg)
+                              (when (.getCursorDirty cg)
                                 (.force ^MappedByteBuffer (.cursor-mmap cg))
-                                (reset! (.cursor-dirty? cg) false)))
+                                (.setCursorDirty cg false)))
                             (str "k7-cursor-" group-id))]
              (.setDaemon t true)
              (.start t)
@@ -532,7 +602,7 @@
 (defn- write-cursor! [^ConsumerGroup cg ^long offset]
   (.putLong ^ByteBuffer (.cursor-mmap cg) 0 offset)
   (case (.cursor-fsync-strategy cg)
-    :async (do (reset! (.cursor-dirty? cg) true)
+    :async (do (.setCursorDirty cg true)
                (LockSupport/unpark (.getCursorFlushThread cg)))
     :flush nil ; mmap write sufficient; OS will flush eventually
     :sync (.force ^MappedByteBuffer (.cursor-mmap cg))))
@@ -541,9 +611,7 @@
   "Lowest unacked offset (= safe commit point).
    If pending is empty the full read-head is committed."
   ^long [^ILongRingBuffer pending ^long read-head]
-  (if (lrb-empty? pending)
-    read-head
-    (lrb-first pending)))
+  (.lrbFrontier pending read-head))
 
 (defn ack!
   "Acknowledge a delivered message.
@@ -585,22 +653,25 @@
 
 (defn- find-segment-for-offset
   "Find the segment whose base-offset range contains global-offset.
-   Uses an indexed loop to avoid boxing in reduce."
+   Uses binary search since segments are always sorted by ascending base-offset."
   ^Segment [^Queue q ^long global-offset]
   (let [segs @(.segments q)
-        n (count segs)]
-    (loop [i 0
-           best nil]
-      (if (== i n)
-        best
-        (let [s ^Segment (nth segs i)
-              base (.base-offset s)]
-          (recur (inc i)
-                 (if (and (<= base global-offset)
-                          (or (nil? best)
-                              (> base (.base-offset ^Segment best))))
-                   s
-                   best)))))))
+        n (int (count segs))]
+    (if (== n 0)
+      nil
+      (loop [lo (int 0)
+             hi (int (dec n))]
+        (if (> lo hi)
+          ;; lo is the insertion point; the segment we want is at (dec lo)
+          (when (pos? lo)
+            (nth segs (dec lo)))
+          (let [mid (int (+ lo (bit-shift-right (- hi lo) 1)))
+                s ^Segment (nth segs mid)
+                base (.base-offset s)]
+            (cond
+              (== base global-offset) s
+              (< base global-offset) (recur (unchecked-inc-int mid) hi)
+              :else (recur lo (unchecked-dec-int mid)))))))))
 
 (defn- try-read-one!
   "Attempt to read one message. Returns a Msg or nil.
@@ -632,11 +703,9 @@
                         payload-start (int (+ local-pos frame-header-size))
                         end (int (+ local-pos frame-header-size len))]
                     (when (and (pos? len) (<= end cap))
-                      ;; One duplicate, one slice — reused for both CRC validation
-                      ;; and returned as the payload (rewound, made read-only).
-                      (let [dup (.duplicate mmap)
-                            _ (-> dup (.position payload-start) (.limit end))
-                            slice (.slice dup)
+                      ;; Single .slice(index, length) (Java 13+) replaces
+                      ;; duplicate + position + limit + slice — one fewer allocation.
+                      (let [slice (.slice mmap payload-start (- end payload-start))
                             crc ^CRC32C (.get tl-crc32c)
                             _ (doto crc (.reset) (.update ^ByteBuffer slice))]
                         (when (== stored-crc (unchecked-int (.getValue crc)))
@@ -645,7 +714,7 @@
                             (.set ^AtomicLong (.read-head cg) next-rh)
                             (lrb-add! (.getPending cg) rh)
                             ;; read-only view: prevents callers from corrupting mmap data
-                            (Msg. rh (-> slice .rewind .asReadOnlyBuffer))))))))))))))))
+                            (Msg. rh (.asReadOnlyBuffer (-> slice .rewind)))))))))))))))))
 
 (defn poll!
   "Adaptive batch poll. Returns a vector of Msg records.
