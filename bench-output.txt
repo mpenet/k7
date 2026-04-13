@@ -7,144 +7,136 @@ OS:  Mac OS X aarch64
 
 ╔══ enqueue! throughput  strategy=flush  payload=32b  n=10000
 
-Evaluation count : 1434 in 6 samples of 239 calls.
-             Execution time mean : 503.459694 µs
-    Execution time std-deviation : 150.910013 µs
-   Execution time lower quantile : 376.688715 µs ( 2.5%)
-   Execution time upper quantile : 693.650013 µs (97.5%)
-                   Overhead used : 1.836890 ns
-  => 19.86M msg/s  (mean 503.460µs per batch of 10000)
+Evaluation count : 1080 in 6 samples of 180 calls.
+             Execution time mean : 439.891898 µs
+    Execution time std-deviation : 172.428634 µs
+   Execution time lower quantile : 324.678861 µs ( 2.5%)
+   Execution time upper quantile : 657.691822 µs (97.5%)
+                   Overhead used : 1.929174 ns
+  => 22.73M msg/s  (mean 439.892µs per batch of 10000)
 
 ╔══ enqueue! throughput  strategy=async  payload=32b  n=10000
 
-Evaluation count : 732 in 6 samples of 122 calls.
-             Execution time mean : 1.342528 ms
-    Execution time std-deviation : 306.217298 µs
-   Execution time lower quantile : 1.016875 ms ( 2.5%)
-   Execution time upper quantile : 1.767809 ms (97.5%)
-                   Overhead used : 1.836890 ns
-  => 7.45M msg/s  (mean 1342.528µs per batch of 10000)
+Evaluation count : 600 in 6 samples of 100 calls.
+             Execution time mean : 840.283013 µs
+    Execution time std-deviation : 93.613150 µs
+   Execution time lower quantile : 735.845990 µs ( 2.5%)
+   Execution time upper quantile : 968.131576 µs (97.5%)
+                   Overhead used : 1.929174 ns
+  => 11.90M msg/s  (mean 840.283µs per batch of 10000)
 
 ╔══ poll! throughput  batch-size=1  n=5000
 
-Evaluation count : 828 in 6 samples of 138 calls.
-             Execution time mean : 768.252443 µs
-    Execution time std-deviation : 47.967761 µs
-   Execution time lower quantile : 729.688986 µs ( 2.5%)
-   Execution time upper quantile : 836.710540 µs (97.5%)
-                   Overhead used : 1.836890 ns
-  => 6.51M msg/s  (mean 768.252µs per batch of 5000)
+Evaluation count : 762 in 6 samples of 127 calls.
+             Execution time mean : 826.329108 µs
+    Execution time std-deviation : 8.606949 µs
+   Execution time lower quantile : 814.764480 µs ( 2.5%)
+   Execution time upper quantile : 834.773498 µs (97.5%)
+                   Overhead used : 1.929174 ns
+  => 6.05M msg/s  (mean 826.329µs per batch of 5000)
 
 ╔══ poll! throughput  batch-size=16  n=5000
 
-Evaluation count : 828 in 6 samples of 138 calls.
-             Execution time mean : 783.385517 µs
-    Execution time std-deviation : 36.623668 µs
-   Execution time lower quantile : 747.934435 µs ( 2.5%)
-   Execution time upper quantile : 821.612268 µs (97.5%)
-                   Overhead used : 1.869472 ns
-  => 6.38M msg/s  (mean 783.386µs per batch of 5000)
+Evaluation count : 762 in 6 samples of 127 calls.
+             Execution time mean : 824.150902 µs
+    Execution time std-deviation : 12.147243 µs
+   Execution time lower quantile : 802.689016 µs ( 2.5%)
+   Execution time upper quantile : 833.683110 µs (97.5%)
+                   Overhead used : 1.929174 ns
+  => 6.07M msg/s  (mean 824.151µs per batch of 5000)
 
 ╔══ poll! throughput  batch-size=64  n=5000
 
-Evaluation count : 828 in 6 samples of 138 calls.
-             Execution time mean : 760.039200 µs
-    Execution time std-deviation : 40.903113 µs
-   Execution time lower quantile : 725.371022 µs ( 2.5%)
-   Execution time upper quantile : 817.105171 µs (97.5%)
-                   Overhead used : 1.869472 ns
-  => 6.58M msg/s  (mean 760.039µs per batch of 5000)
+Evaluation count : 732 in 6 samples of 122 calls.
+             Execution time mean : 819.664516 µs
+    Execution time std-deviation : 24.605829 µs
+   Execution time lower quantile : 780.838582 µs ( 2.5%)
+   Execution time upper quantile : 842.272069 µs (97.5%)
+                   Overhead used : 1.929174 ns
+  => 6.10M msg/s  (mean 819.665µs per batch of 5000)
 
 ╔══ poll! throughput  batch-size=256  n=5000
 
-Evaluation count : 828 in 6 samples of 138 calls.
-             Execution time mean : 786.756541 µs
-    Execution time std-deviation : 40.812367 µs
-   Execution time lower quantile : 739.236362 µs ( 2.5%)
-   Execution time upper quantile : 837.747462 µs (97.5%)
-                   Overhead used : 1.869472 ns
-  => 6.36M msg/s  (mean 786.757µs per batch of 5000)
+Evaluation count : 726 in 6 samples of 121 calls.
+             Execution time mean : 814.373763 µs
+    Execution time std-deviation : 7.407287 µs
+   Execution time lower quantile : 808.174380 µs ( 2.5%)
+   Execution time upper quantile : 824.516325 µs (97.5%)
+                   Overhead used : 1.929174 ns
+  => 6.14M msg/s  (mean 814.374µs per batch of 5000)
 
 ╔══ poll! throughput  batch-size=1024  n=5000
 
-Evaluation count : 750 in 6 samples of 125 calls.
-             Execution time mean : 779.487025 µs
-    Execution time std-deviation : 48.517962 µs
-   Execution time lower quantile : 726.911800 µs ( 2.5%)
-   Execution time upper quantile : 840.261055 µs (97.5%)
-                   Overhead used : 1.869472 ns
-  => 6.41M msg/s  (mean 779.487µs per batch of 5000)
+Evaluation count : 768 in 6 samples of 128 calls.
+             Execution time mean : 824.242542 µs
+    Execution time std-deviation : 14.939054 µs
+   Execution time lower quantile : 808.676141 µs ( 2.5%)
+   Execution time upper quantile : 842.148352 µs (97.5%)
+                   Overhead used : 1.929174 ns
+  => 6.07M msg/s  (mean 824.243µs per batch of 5000)
 
 ╔══ round-trip latency  strategy=flush
 
-Evaluation count : 3728976 in 6 samples of 621496 calls.
-             Execution time mean : 184.215216 ns
-    Execution time std-deviation : 38.490501 ns
-   Execution time lower quantile : 162.802880 ns ( 2.5%)
-   Execution time upper quantile : 250.065208 ns (97.5%)
-                   Overhead used : 1.869472 ns
-
-Found 1 outliers in 6 samples (16.6667 %)
-        low-severe       1 (16.6667 %)
- Variance from outliers : 64.0155 % Variance is severely inflated by outliers
-  => 5.43M msg/s  (mean 0.184µs per batch of 1)
+Evaluation count : 3934158 in 6 samples of 655693 calls.
+             Execution time mean : 155.098106 ns
+    Execution time std-deviation : 3.344921 ns
+   Execution time lower quantile : 149.265568 ns ( 2.5%)
+   Execution time upper quantile : 157.947461 ns (97.5%)
+                   Overhead used : 1.929174 ns
+  => 6.45M msg/s  (mean 0.155µs per batch of 1)
 
 ╔══ round-trip latency  strategy=sync
 
-Evaluation count : 3414 in 6 samples of 569 calls.
-             Execution time mean : 177.320529 µs
-    Execution time std-deviation : 1.059869 µs
-   Execution time lower quantile : 176.457197 µs ( 2.5%)
-   Execution time upper quantile : 178.903878 µs (97.5%)
-                   Overhead used : 1.869472 ns
-  => 5640 msg/s  (mean 177.321µs per batch of 1)
+Evaluation count : 2382 in 6 samples of 397 calls.
+             Execution time mean : 255.861354 µs
+    Execution time std-deviation : 6.830978 µs
+   Execution time lower quantile : 252.139864 µs ( 2.5%)
+   Execution time upper quantile : 267.694861 µs (97.5%)
+                   Overhead used : 1.929174 ns
+
+Found 1 outliers in 6 samples (16.6667 %)
+	low-severe	 1 (16.6667 %)
+ Variance from outliers : 13.8889 % Variance is moderately inflated by outliers
+  => 3908 msg/s  (mean 255.861µs per batch of 1)
 
 ╔══ large payload (64KB)  n=100
 
-Evaluation count : 144 in 6 samples of 24 calls.
-             Execution time mean : 5.164417 ms
-    Execution time std-deviation : 2.215291 ms
-   Execution time lower quantile : 3.296299 ms ( 2.5%)
-   Execution time upper quantile : 7.609300 ms (97.5%)
-                   Overhead used : 1.869472 ns
-  => 19363 msg/s  (mean 5164.417µs per batch of 100)
+Evaluation count : 726 in 6 samples of 121 calls.
+             Execution time mean : 832.891211 µs
+    Execution time std-deviation : 2.141148 µs
+   Execution time lower quantile : 830.605860 µs ( 2.5%)
+   Execution time upper quantile : 835.083947 µs (97.5%)
+                   Overhead used : 1.929174 ns
+  => 120064 msg/s  (mean 832.891µs per batch of 100)
 
 ╔══ multi-consumer  groups=4  n=5000
 
-Evaluation count : 162 in 6 samples of 27 calls.
-             Execution time mean : 3.503846 ms
-    Execution time std-deviation : 120.454147 µs
-   Execution time lower quantile : 3.292199 ms ( 2.5%)
-   Execution time upper quantile : 3.610105 ms (97.5%)
-                   Overhead used : 1.869472 ns
-
-Found 1 outliers in 6 samples (16.6667 %)
-        low-severe       1 (16.6667 %)
- Variance from outliers : 13.8889 % Variance is moderately inflated by outliers
-  => 5.71M msg/s  (mean 3503.846µs per batch of 20000)
+Evaluation count : 174 in 6 samples of 29 calls.
+             Execution time mean : 3.467965 ms
+    Execution time std-deviation : 48.795599 µs
+   Execution time lower quantile : 3.411306 ms ( 2.5%)
+   Execution time upper quantile : 3.530744 ms (97.5%)
+                   Overhead used : 1.929174 ns
+  => 5.77M msg/s  (mean 3467.965µs per batch of 20000)
 
 ╔══ segment roll  — normal enqueue vs roll-triggering enqueue
 
   payload=1024B  segment-size=256KB
 
   [baseline] normal enqueue (no roll):
-Evaluation count : 1235520 in 6 samples of 205920 calls.
-             Execution time mean : 784.184581 ns
-    Execution time std-deviation : 168.926696 ns
-   Execution time lower quantile : 459.887728 ns ( 2.5%)
-   Execution time upper quantile : 898.745659 ns (97.5%)
-                   Overhead used : 1.869472 ns
-
-Found 1 outliers in 6 samples (16.6667 %)
-        low-severe       1 (16.6667 %)
- Variance from outliers : 64.1725 % Variance is severely inflated by outliers
-  => 1.28M msg/s  (mean 0.784µs per batch of 1)
+Evaluation count : 688656 in 6 samples of 114776 calls.
+             Execution time mean : 666.388483 ns
+    Execution time std-deviation : 288.736483 ns
+   Execution time lower quantile : 441.018035 ns ( 2.5%)
+   Execution time upper quantile : 997.176701 ns (97.5%)
+                   Overhead used : 1.929174 ns
+  => 1.50M msg/s  (mean 0.666µs per batch of 1)
 
   [roll] single segment-roll timing (manual, 200 trials):
-  mean=0.6µs  p50=0.5µs  p99=1.8µs
+  mean=0.5µs  p50=0.5µs  p99=1.1µs
 
 ╔══ sustained throughput  n=100000  strategy=:flush
 
-  msgs: 100000  elapsed: 0.010s  throughput: 9.75M msg/s  224.2 MB/s
+  msgs: 100000  elapsed: 0.012s  throughput: 8.20M msg/s  188.6 MB/s
 
 Done.
