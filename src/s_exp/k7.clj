@@ -26,10 +26,6 @@
 ;; frame-align bytes is the maximum padding ever needed.
 (def ^:private ^bytes zero-pad (byte-array frame-align))
 
-;; Reusable copy-option array for atomic segment file renames.
-(def ^:private ^"[Ljava.nio.file.CopyOption;" atomic-move-opts
-  (into-array java.nio.file.CopyOption [java.nio.file.StandardCopyOption/ATOMIC_MOVE]))
-
 ;; Thread-local CRC32C instances — avoids per-message allocation on hot path.
 ;; CRC32C is not thread-safe, so each thread gets its own instance.
 ;; ThreadLocal/withInitial takes a Supplier — compiled to a direct interface call,
@@ -274,29 +270,27 @@
   (^void setCommitThread [^Thread t])
   (^boolean getCommitParked [])
   (^void setCommitParked [^boolean v])
-  (^s_exp.k7.Segment getCurrentSeg [])
-  (^void setCurrentSeg [^s_exp.k7.Segment seg])
-  (^s_exp.k7.Segment getNextSeg [])
-  (^void setNextSeg [^s_exp.k7.Segment seg]))
+  (^clojure.lang.IPersistentVector getSegments [])
+  (^void setSegments [^clojure.lang.IPersistentVector v])
+  (^boolean getOpen [])
+  (^void setOpen [^boolean v]))
 
 (deftype Queue [^Path dir
                 ^long segment-size
-                segments ; atom: vector of Segment
+                ^:volatile-mutable ^clojure.lang.IPersistentVector segments
                 ^:volatile-mutable ^Thread commit-thread
                 ^:volatile-mutable ^boolean commit-parked
-                ^:volatile-mutable ^Segment current-seg
-                ^:volatile-mutable ^Segment next-seg ; pre-created segment for fast roll
-                open? ; atom: boolean
+                ^:volatile-mutable ^boolean open
                 fsync-strategy]
   IQueueState
   (getCommitThread [_] commit-thread)
   (setCommitThread [_ t] (set! commit-thread t))
   (getCommitParked [_] commit-parked)
   (setCommitParked [_ v] (set! commit-parked v))
-  (getCurrentSeg [_] current-seg)
-  (setCurrentSeg [_ seg] (set! current-seg seg))
-  (getNextSeg [_] next-seg)
-  (setNextSeg [_ seg] (set! next-seg seg))
+  (getSegments [_] segments)
+  (setSegments [_ v] (set! segments v))
+  (getOpen [_] open)
+  (setOpen [_ v] (set! open v))
   java.io.Closeable
   (close [this] (close-queue! this)))
 
@@ -307,52 +301,19 @@
   (.resolve dir (format "cursor-%s.k7" group-id)))
 
 (defn current-segment ^Segment [^Queue q]
-  (.getCurrentSeg q))
-
-(defn- precreate-next-segment!
-  "Pre-create the next segment file so roll-segment! can swap it in instantly.
-   The segment is created with a temporary filename and placeholder base-offset;
-   roll-segment! renames the file and wraps the resources with the correct metadata."
-  [^Queue q]
-  (when-not (.getNextSeg q)
-    (let [tmp-path (.resolve ^Path (.dir q) "seg-precreated.k7.tmp")
-          opts (into-array OpenOption
-                           [StandardOpenOption/READ
-                            StandardOpenOption/WRITE
-                            StandardOpenOption/CREATE])
-          ch (FileChannel/open tmp-path opts)]
-      (try
-        (let [ss (.segment-size q)]
-          (when (< (.size ch) ss)
-            (.write ch (ByteBuffer/allocate 1) (dec (long ss))))
-          (let [mmap (doto (.map ch FileChannel$MapMode/READ_WRITE 0 ss)
-                       (.order ByteOrder/BIG_ENDIAN))]
-            (.setNextSeg q (Segment. ch mmap tmp-path 0
-                                     (AtomicLong. 0) (AtomicLong. 0) ss))))
-        (catch Throwable t
-          (.close ch)
-          (throw t))))))
+  (peek (.getSegments q)))
 
 (defn- roll-segment! ^Segment [^Queue q]
-  (let [cur (peek @(.segments q))
+  (let [cur (peek (.getSegments q))
         base (if cur
                (+ (.base-offset ^Segment cur) (.get ^AtomicLong (.write-pos ^Segment cur)))
                0)
-        ;; Use pre-created segment resources if available — rename file, wrap with correct metadata
-        pre ^Segment (.getNextSeg q)
-        new-seg (if pre
-                  (let [target-path (segment-path ^Path (.dir q) base)]
-                    (.setNextSeg q nil)
-                    (Files/move ^Path (.path pre) target-path atomic-move-opts)
-                    (Segment. (.channel pre) (.mmap pre) target-path base
-                              (AtomicLong. 0) (AtomicLong. 0) (.capacity pre)))
-                  (open-segment (segment-path ^Path (.dir q) base)
-                                base
-                                (.segment-size q)))]
+        new-seg (open-segment (segment-path ^Path (.dir q) base)
+                              base
+                              (.segment-size q))]
     (when cur
       (force-segment! cur))
-    (swap! (.segments q) conj new-seg)
-    (.setCurrentSeg q new-seg)
+    (.setSegments q (conj (.getSegments q) new-seg))
     new-seg))
 
 (defn queue
@@ -374,7 +335,7 @@
                 dir
                 (Paths/get ^String dir (make-array String 0)))
          _ (Files/createDirectories path (make-array FileAttribute 0))
-         q (Queue. path segment-size (atom []) nil false nil nil (atom true) fsync-strategy)
+         q (Queue. path segment-size [] nil false true fsync-strategy)
          existing (with-open [stream (Files/list path)]
                     (->> (.iterator stream)
                          iterator-seq
@@ -399,8 +360,7 @@
                                 (throw t))))
                           []
                           existing)]
-         (reset! (.segments q) segs)
-         (.setCurrentSeg q (peek segs)))
+         (.setSegments q segs))
        (roll-segment! q))
      ;; commit thread only used for :async strategy
      (when (= fsync-strategy :async)
@@ -410,7 +370,7 @@
                           ;; Cache the current segment; refresh only when it changes
                           ;; (segment roll), avoiding an atom deref on every tick.
                           (loop [cached ^Segment (current-segment q)]
-                            (when @(.open? q)
+                            (when (.getOpen q)
                               (let [cur ^Segment (current-segment q)
                                     ;; refresh cache on segment roll
                                     seg ^Segment (if (identical? cur cached) cached cur)]
@@ -433,20 +393,14 @@
      q)))
 
 (defn close-queue! [^Queue q]
-  (reset! (.open? q) false)
+  (.setOpen q false)
   ;; Unpark and join the commit thread so any in-flight force completes
   ;; before we close the underlying FileChannels.
   (when-let [t (.getCommitThread q)]
     (LockSupport/unpark t)
     (.join t))
-  ;; Clean up unused pre-created segment if it was never rolled in.
-  (when-let [pre (.getNextSeg q)]
-    (.setNextSeg q nil)
-    (close-segment! pre)
-    ;; Delete the pre-created file since it was never used
-    (Files/deleteIfExists ^Path (.path ^Segment pre)))
   ;; Final flush: close-segment! calls mmap.force + channel.close for each segment.
-  (doseq [seg @(.segments q)]
+  (doseq [seg (.getSegments q)]
     (close-segment! seg)))
 
 ;;; ============================================================
@@ -478,14 +432,6 @@
       :flush (.lazySet ^AtomicLong (.committed-pos seg) next-pos)
       :sync (do (force-segment! seg)
                 (.set ^AtomicLong (.committed-pos seg) next-pos)))
-    ;; Eagerly pre-create the next segment when this one passes the fill threshold.
-    ;; This is done synchronously on the writer thread (single-writer constraint)
-    ;; and only triggers once per segment (guarded by nil check in precreate-next-segment!).
-    ;; Integer comparison: threshold = capacity * 3/4 (avoids float division per write).
-    (when (and (nil? (.getNextSeg q))
-               (>= next-pos (unchecked-subtract (.capacity seg)
-                                                 (unsigned-bit-shift-right (.capacity seg) 2))))
-      (precreate-next-segment! q))
     global-off))
 
 ;;; ============================================================
@@ -512,7 +458,9 @@
   (^Thread getCursorFlushThread [])
   (^void setCursorFlushThread [^Thread t])
   (^boolean getCursorDirty [])
-  (^void setCursorDirty [^boolean v]))
+  (^void setCursorDirty [^boolean v])
+  (^boolean getCursorOpen [])
+  (^void setCursorOpen [^boolean v]))
 
 (deftype ConsumerGroup [^String id
                         ^MappedByteBuffer cursor-mmap
@@ -521,7 +469,7 @@
                         ^:volatile-mutable ^ILongRingBuffer pending
                         ^Queue queue
                         ^:volatile-mutable ^boolean cursor-dirty ; volatile boolean, set by consumer, read by flush thread
-                        cursor-open? ; atom: boolean stop flag for flush thread
+                        ^:volatile-mutable ^boolean cursor-open ; volatile boolean stop flag for flush thread
                         ^:volatile-mutable ^Thread cursor-flush-thread
                         cursor-fsync-strategy]
   ICGState
@@ -531,6 +479,8 @@
   (setCursorFlushThread [_ t] (set! cursor-flush-thread t))
   (getCursorDirty [_] cursor-dirty)
   (setCursorDirty [_ v] (set! cursor-dirty v))
+  (getCursorOpen [_] cursor-open)
+  (setCursorOpen [_ v] (set! cursor-open v))
   java.io.Closeable
   (close [this] (close-consumer-group! this)))
 
@@ -562,7 +512,7 @@
                                 (lrb-new)
                                 q
                                 false
-                                (atom true) ; cursor-open?
+                                true
                                 nil
                                 cursor-fsync-strategy)]
          (when (= cursor-fsync-strategy :async)
@@ -570,7 +520,7 @@
                             ^Runnable
                             (fn []
                               ;; Run while open; on stop do one final flush if dirty.
-                              (while @(.cursor-open? cg)
+                              (while (.getCursorOpen cg)
                                 (when (.getCursorDirty cg)
                                   (.force ^MappedByteBuffer (.cursor-mmap cg))
                                   (.setCursorDirty cg false))
@@ -591,7 +541,7 @@
 (defn close-consumer-group! [^ConsumerGroup cg]
   ;; Signal flush thread to stop, unpark it so it exits promptly,
   ;; then join to ensure the final flush completes before we close the channel.
-  (reset! (.cursor-open? cg) false)
+  (.setCursorOpen cg false)
   (when-let [t (.getCursorFlushThread cg)]
     (LockSupport/unpark t)
     (.join t))
@@ -655,7 +605,7 @@
   "Find the segment whose base-offset range contains global-offset.
    Uses binary search since segments are always sorted by ascending base-offset."
   ^Segment [^Queue q ^long global-offset]
-  (let [segs @(.segments q)
+  (let [segs (.getSegments q)
         n (int (count segs))]
     (if (== n 0)
       nil
