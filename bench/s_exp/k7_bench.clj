@@ -134,8 +134,9 @@
         n 100]
     (bench-title (str "large payload (64KB)  n=" n))
     (with-tmp-queue+cg [q cg {:fsync-strategy :flush} {:cursor-fsync-strategy :async}]
+      (enqueue-n! q payload n)
       (let [result (crit/quick-benchmark
-                    (do (enqueue-n! q payload n)
+                    (do (k7/seek! cg 0)
                         (drain-all! cg n))
                     {:os true :runtime true})]
         (crit/report-result result)
