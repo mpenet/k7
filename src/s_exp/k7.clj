@@ -62,7 +62,8 @@
   (^void lrbRemove [^long v])
   (^long lrbFirst [])
   (^boolean lrbEmpty [])
-  (^void lrbClear []))
+  (^void lrbClear [])
+  (^long lrbFrontier [^long read-head]))
 
 (deftype LongRingBuffer [^:unsynchronized-mutable ^longs data
                          ^:unsynchronized-mutable ^int head ; index of first element
@@ -110,7 +111,11 @@
   (lrbEmpty [_this] (== head tail))
   (lrbClear [_this]
     (set! head (int 0))
-    (set! tail (int 0))))
+    (set! tail (int 0)))
+  (lrbFrontier [_this read-head]
+    (if (== head tail)
+      read-head
+      (aget data (bit-and head (unchecked-dec-int (alength data)))))))
 
 (defn lrb-new
   "Create a new empty LongRingBuffer with the given initial capacity (rounded up to power of 2)."
@@ -131,9 +136,8 @@
 ;;; ============================================================
 
 (defn aligned-frame-size ^long [^long payload-len]
-  (let [total (+ frame-header-size payload-len)
-        r (bit-and total frame-align-mask)]
-    (if (zero? r) total (+ total (- frame-align r)))))
+  (let [total (+ frame-header-size payload-len)]
+    (bit-and (+ total frame-align-mask) (bit-not frame-align-mask))))
 
 (defn write-frame!
   "Write a framed message into buf at position pos.
@@ -550,9 +554,7 @@
   "Lowest unacked offset (= safe commit point).
    If pending is empty the full read-head is committed."
   ^long [^ILongRingBuffer pending ^long read-head]
-  (if (lrb-empty? pending)
-    read-head
-    (lrb-first pending)))
+  (.lrbFrontier pending read-head))
 
 (defn ack!
   "Acknowledge a delivered message.
@@ -641,11 +643,9 @@
                         payload-start (int (+ local-pos frame-header-size))
                         end (int (+ local-pos frame-header-size len))]
                     (when (and (pos? len) (<= end cap))
-                      ;; One duplicate, one slice — reused for both CRC validation
-                      ;; and returned as the payload (rewound, made read-only).
-                      (let [dup (.duplicate mmap)
-                            _ (-> dup (.position payload-start) (.limit end))
-                            slice (.slice dup)
+                      ;; Single .slice(index, length) (Java 13+) replaces
+                      ;; duplicate + position + limit + slice — one fewer allocation.
+                      (let [slice (.slice mmap payload-start (- end payload-start))
                             crc ^CRC32C (.get tl-crc32c)
                             _ (doto crc (.reset) (.update ^ByteBuffer slice))]
                         (when (== stored-crc (unchecked-int (.getValue crc)))
