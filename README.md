@@ -4,7 +4,7 @@
 A high-performance disk-backed queue for Clojure. 
 <br/>
 <br/>
-[~20M msg/s enqueue and ~6.5M msg/s poll+ack](#performance) 
+[~23M msg/s enqueue, ~6M msg/s poll+ack, ~155ns round-trip](#performance)
 <br/> using `:flush` on Apple M1, JVM 20 - [bench-output](https://github.com/mpenet/k7/blob/main/bench-output.txt).
 <br/>
 
@@ -169,28 +169,28 @@ Measured on Apple M1 Pro, JVM 20, G1GC, 32-byte payloads.
 
 | Strategy | Throughput |
 |----------|------------|
-| `:flush` | ~19.8M msg/s |
-| `:async` | ~16.2M msg/s |
-| `:sync` | ~3.7K msg/s |
+| `:flush` | ~23M msg/s |
+| `:async` | ~12M msg/s |
+| `:sync` | ~4.5K msg/s |
 
-`:sync` is bounded by `msync` latency (~267µs/call on this hardware).
+`:sync` is bounded by `msync` latency (~155–220µs/call on this hardware).
 
 **`poll+ack` throughput by batch size (`:flush`):**
 
 | Batch size | Throughput |
 |------------|------------|
-| 1 | ~5.3M msg/s |
-| 16 | ~5.1M msg/s |
-| 64 | ~5.2M msg/s |
-| 256 | ~5.1M msg/s |
-| 1024 | ~5.2M msg/s |
+| 1 | ~6.1M msg/s |
+| 16 | ~6.1M msg/s |
+| 64 | ~6.1M msg/s |
+| 256 | ~6.1M msg/s |
+| 1024 | ~6.0M msg/s |
 
 **Round-trip latency** (single enqueue → poll → ack):
 
-| Strategy | Latency |
-|----------|---------|
-| `:flush` | ~200 ns |
-| `:sync` | ~205 µs |
+| Strategy | Latency | Throughput |
+|----------|---------|------------|
+| `:flush` | ~155 ns | ~6.4M msg/s |
+| `:sync`  | ~155–260 µs | ~3.9–6.5K msg/s |
 
 `enqueue!` is zero-alloc. Per-message allocation in `poll!` is dominated by the
 read-only `ByteBuffer` slice returned as the payload; the pending-offset
